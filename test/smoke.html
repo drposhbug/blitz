@@ -1,0 +1,90 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>RUNNING</title>
+<style>body{font:14px monospace;background:#111;color:#eee}</style></head><body>
+<iframe id="f" src="../index.html?autostart=1&mode=kb" width="960" height="540"></iframe>
+<pre id="log"></pre>
+<script>
+// Drives the real game page (keyboard mode) frame by frame through a whole fight.
+const log = m => document.getElementById('log').textContent += m + '\n';
+const f = document.getElementById('f');
+f.onload = () => {
+  const w = f.contentWindow, d = f.contentDocument;
+  setTimeout(() => {
+    const fails = [];
+    const check = (c, m) => { if (!c) fails.push(m); log((c ? 'ok   ' : 'FAIL ') + m); };
+    try {
+      const F = w.__fight;
+      F.freeze = true;
+      const until = (cond, max) => { let n = 0; while (!cond() && n++ < (max || 2000)) F.step(16); return cond(); };
+      const release = () => { for (const k in F.kb) F.kb[k] = false; };
+      check(F.mode === 'kb' && !!F.fight, 'autostarted in keyboard mode');
+      check(!!F.renderer.arena, 'an arena is loaded: ' + (F.renderer.arena && F.renderer.arena.name));
+      check(w.ARENAS[0].key === 'rooftop' && w.ARENAS[0].full === true && w.ARENAS[1].key === 'waterfront', 'rooftop (the uploaded backdrop) and waterfront are the first two stages');
+      check(d.querySelector('#intro .foe .name').textContent === 'SOL VEGA', 'intro card names SOL VEGA');
+      const fi = F.fight;
+      check(until(() => fi.npc.state === 'idle'), 'doge leaves intro');
+      // walk forward toward doge until in reach
+      F.kb.fwd = true;
+      check(until(() => fi.inRange(), 400), 'walking with W gets you into reach');
+      release();
+      check(until(() => fi.npc.state === 'windup'), 'doge winds up an attack');
+      log('     attack=' + fi.npc.attack);
+      // back off out of reach
+      F.kb.back = true;
+      check(until(() => fi.npc.state === 'stun' || fi.player.hitsTaken > 0), 'strike resolves');
+      release();
+      check(fi.player.dodges === 1 && fi.player.hp === 100, 'stepping back is a dodge (dodges=' + fi.player.dodges + ' hp=' + fi.player.hp + ')');
+      check(F.renderer.ann && F.renderer.ann.text === 'DODGE!', 'announcer shows DODGE!');
+      // whiff from out of reach, then step in and crit
+      check(F.punch('R', 1) === 'whiff', 'punching from out of reach whiffs');
+      F.kb.fwd = true; until(() => fi.inRange(), 300); release();
+      check(fi.npc.state === 'stun' && F.punch('L', 1) === 'crit', 'walk in and crit the stunned doge');
+      for (let i = 0; i < 5; i++) F.step(16); // ~80ms into the punch animation
+      check(F.arms.lw.f > 1.0, 'keyboard punch extends the left arm on screen (f=' + F.arms.lw.f.toFixed(2) + ')');
+      // sidestep during his next wind-up: eyes stay put, he misses
+      check(until(() => fi.npc.state === 'windup', 3000), 'doge winds up again');
+      F.kb.R = true; until(() => fi.npc.state !== 'windup' && fi.npc.state !== 'strike', 300); release();
+      check(fi.player.dodges === 2, 'sidestepping off his line is a dodge');
+      // eyes re-track him afterwards
+      check(until(() => Math.abs(fi.rel.lat) < 0.1 && fi.rel.fwd > 0, 400), 'eyes follow doge back to centre (lat=' + fi.rel.lat.toFixed(2) + ')');
+      // now stand still in reach and eat one
+      F.kb.fwd = true; until(() => fi.inRange(), 300); release();
+      check(until(() => fi.player.hitsTaken > 0, 3000), 'standing in reach gets you hit');
+      check(F.renderer.ann && F.renderer.ann.text === 'NO DODGE!', 'announcer shows NO DODGE!');
+      check(fi.player.combo === 0, 'combo reset after hit');
+      // duck a high one
+      check(until(() => fi.npc.state === 'windup' && w.ATTACKS[fi.npc.attack].high, 4000), 'doge throws a high punch');
+      F.kb.duck = true; until(() => fi.npc.state !== 'windup' && fi.npc.state !== 'strike', 200); release();
+      check(fi.player.dodges === 3, 'ducking under it is a dodge');
+      // finish him
+      F.kb.fwd = true; until(() => fi.inRange(), 300); release();
+      fi.npc.hp = 1; F.punch('L', 1); F.step(16);
+      check(fi.over === 'win', 'doge is KO');
+      until(() => false, 120);
+      check(!d.querySelector('#end').classList.contains('hidden'), 'end screen appears');
+      check(d.querySelector('#endTitle').textContent === 'VICTORY', 'victory title');
+      check(w.localStorage.getItem('dogefight.level') === '2', 'level advanced to 2');
+      const arena1 = F.renderer.arenaIdx;
+      d.querySelector('#btnNext').click();
+      const f2 = F.fight; check(f2 !== fi && f2.level === 2, 'next level fight created');
+      check(F.renderer.arenaIdx !== arena1, 'stage cycles to a new arena on the next level');
+      // render each arena once to catch drawing errors
+      for (let i = 0; i < w.ARENAS.length; i++) { F.setArena(i); F.step(16); F.step(16); }
+      F.setArena(F.renderer.arenaIdx);
+      f2.player.hp = 1;
+      check(until(() => f2.over === 'lose', 4000), 'losing works');
+      until(() => false, 120);
+      check(d.querySelector('#endTitle').textContent === 'DEFEAT' && d.querySelector('#btnNext').classList.contains('hidden'), 'defeat screen');
+      // arms from a synthetic 3D pose: a punched-out left arm should read as forward
+      const lm = Array.from({ length: 33 }, () => ({ x: 0.5, y: 0.5, z: 0 }));
+      lm[11] = { x: 0.6, y: 0.5, z: 0 }; lm[12] = { x: 0.4, y: 0.5, z: 0 }; lm[13] = { x: 0.62, y: 0.5, z: -0.1 }; lm[15] = { x: 0.6, y: 0.48, z: -0.25 }; lm[14] = { x: 0.35, y: 0.55, z: 0 }; lm[16] = { x: 0.4, y: 0.4, z: -0.05 };
+      const arms = F.armsFromPose(lm);
+      check(arms.lw.f > 1 && arms.lw.f > arms.rw.f && arms.rw.u > 0, 'armsFromPose maps depth to forward extension');
+      check(F.errors.length === 0, 'no runtime errors: ' + JSON.stringify(F.errors));
+    } catch (e) { fails.push(e.message); log('EXC ' + e.message + '\n' + e.stack); }
+    document.title = fails.length ? 'FAIL ' + fails.length : 'PASS';
+    log(document.title);
+    w.localStorage.setItem('dogefight.level', '1');
+  }, 800);
+};
+</script></body></html>

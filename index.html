@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BLITZ</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+  <canvas id="game"></canvas>
+
+  <div id="pip" class="hidden">
+    <video id="cam" autoplay playsinline muted></video>
+    <canvas id="pipc" width="240" height="180"></canvas>
+    <div id="pipStatus"></div>
+  </div>
+
+  <div id="topbar" class="hidden">
+    <button id="btnMute" title="mute (M)">SOUND</button>
+    <button id="btnRecal" title="recalibrate stance (C)">RECAL</button>
+    <button id="btnPause" title="pause (Esc)">PAUSE</button>
+  </div>
+
+  <!-- ===== TITLE / MAIN MENU ===== -->
+  <div id="menu" class="screen">
+    <div class="bar top">
+      <div class="tag"><i class="dia"></i>FIRST PERSON · WEBCAM · 360°</div>
+      <div class="chips">
+        <div class="chip"><i id="camDot" class="dot"></i><span id="camStatus">WEBCAM</span></div>
+        <div class="chip"><span class="lbl">STAGE</span><span id="stageChip">K.O. MART WATERFRONT</span></div>
+      </div>
+    </div>
+    <div class="brand">
+      <div class="kicker">STREET BOXING</div>
+      <div class="logo">BLITZ</div>
+      <div class="rule"><i></i><span>YOUR BODY IS THE CONTROLLER</span></div>
+    </div>
+    <div id="menuList" class="list">
+      <div class="mi" id="btnCam" data-action="cam"><i></i><b>FIGHT</b><span>WEBCAM</span></div>
+      <div class="mi" id="btnKb" data-action="kb"><i></i><b>KEYBOARD FIGHT</b></div>
+      <div class="mi" data-action="stages"><i></i><b>STAGE SELECT</b></div>
+      <div class="mi" data-action="controls"><i></i><b>CONTROLS</b></div>
+      <div class="mi" data-action="log"><i></i><b>TRAINING LOG</b><span>CALORIES</span></div>
+      <div class="mi" data-action="options"><i></i><b>OPTIONS</b></div>
+    </div>
+    <div id="status" class="status"></div>
+    <div class="bar bottom">
+      <div class="stats">
+        <div><span class="lbl">RANK</span><b id="rankVal" class="gold">01</b></div>
+        <div><span class="lbl">BEST COMBO</span><b id="comboVal">00</b></div>
+        <div><span class="lbl">KNOCKOUTS</span><b id="koVal">00</b></div>
+      </div>
+      <div class="keys"><span><kbd>W S</kbd>SELECT</span><span><kbd>ENTER</kbd>CONFIRM</span><span><kbd>ESC</kbd>BACK</span></div>
+    </div>
+  </div>
+
+  <!-- ===== STAGE SELECT ===== -->
+  <div id="stages" class="screen panel hidden">
+    <div class="head">
+      <div><div class="kicker">CHOOSE YOUR GROUND</div><h2>STAGE SELECT</h2></div>
+      <label class="toggle"><input type="checkbox" id="cycle"><i></i><span>CYCLE EVERY RANK</span></label>
+    </div>
+    <div id="stageGrid" class="grid"></div>
+    <div class="bar bottom">
+      <div class="keys"><span><kbd>A D</kbd>CHOOSE</span><span><kbd>ESC</kbd>BACK</span></div>
+      <div class="btns"><button id="btnStagesBack" class="ghost">BACK</button><button id="btnStagesFight" class="primary">FIGHT HERE</button></div>
+    </div>
+  </div>
+
+  <!-- ===== CONTROLS ===== -->
+  <div id="controls" class="screen panel hidden">
+    <div class="head"><div><div class="kicker">HOW TO FIGHT</div><h2>CONTROLS</h2></div></div>
+    <div class="cols">
+      <table>
+        <tr><th colspan="2">WEBCAM</th></tr>
+        <tr><td>Sidestep</td><td>lean / step left or right, back to centre to stop</td></tr>
+        <tr><td>Forward / back</td><td>lean / step toward or away from the camera</td></tr>
+        <tr><td>Turn</td><td>automatic, your eyes follow Sol</td></tr>
+        <tr><td>Punch</td><td>snap either fist forward (lands only in reach)</td></tr>
+        <tr><td>Duck</td><td>crouch under jabs and hooks</td></tr>
+        <tr><td>Block</td><td>both fists up covering your face</td></tr>
+        <tr><td>Haymaker</td><td>full special meter, both hands over your head</td></tr>
+      </table>
+      <table>
+        <tr><th colspan="2">KEYBOARD</th></tr>
+        <tr><td><kbd>A</kbd> <kbd>D</kbd></td><td>sidestep</td></tr>
+        <tr><td><kbd>W</kbd> <kbd>S</kbd></td><td>forward / back</td></tr>
+        <tr><td><kbd>J</kbd> <kbd>K</kbd></td><td>left / right punch</td></tr>
+        <tr><td><kbd>SPACE</kbd></td><td>duck</td></tr>
+        <tr><td><kbd>F</kbd> / <kbd>SHIFT</kbd></td><td>block</td></tr>
+        <tr><td><kbd>E</kbd></td><td>hands up (special)</td></tr>
+        <tr><td><kbd>C</kbd> <kbd>M</kbd> <kbd>ESC</kbd></td><td>recalibrate · mute · pause</td></tr>
+      </table>
+    </div>
+    <p class="note">Sol telegraphs every punch with a glowing glove. Step out of reach, sidestep off her line, or duck the high ones: <b>DODGE!</b> leaves her dizzy, that is when you swing. Overheads can't be ducked or blocked. Body blows and uppercuts must be blocked or walked away from.</p>
+    <div class="bar bottom"><div class="keys"><span><kbd>ESC</kbd>BACK</span></div><div class="btns"><button id="btnControlsBack" class="ghost">BACK</button></div></div>
+  </div>
+
+  <!-- ===== OPTIONS ===== -->
+  <div id="options" class="screen panel hidden">
+    <div class="head"><div><div class="kicker">TUNE IT</div><h2>OPTIONS</h2></div></div>
+    <div class="form">
+      <label><span>MASTER VOLUME</span><input type="range" id="optVolume" min="0" max="100" value="80"><b class="val" data-for="optVolume">80</b></label>
+      <label><span>ANNOUNCER VOICE</span><input type="checkbox" id="optVoice" checked><i class="sw"></i></label>
+      <label><span>MOVEMENT DEAD ZONE</span><input type="range" id="optDead" min="10" max="50" value="25"><b class="val" data-for="optDead">25</b></label>
+      <label><span>PUNCH SENSITIVITY</span><input type="range" id="optPunch" min="50" max="150" value="100"><b class="val" data-for="optPunch">100</b></label>
+      <label><span>BODY WEIGHT (KG)</span><input type="range" id="optWeight" min="40" max="150" value="75"><b class="val" data-for="optWeight">75</b></label>
+      <label><span>RESET PROGRESS</span><button id="btnReset" class="ghost small">RESET RANK</button></label>
+    </div>
+    <div class="bar bottom"><div class="keys"><span><kbd>ESC</kbd>BACK</span></div><div class="btns"><button id="btnOptionsBack" class="ghost">BACK</button></div></div>
+  </div>
+
+  <!-- ===== TRAINING LOG ===== -->
+  <div id="log" class="screen panel hidden">
+    <div class="head"><div><div class="kicker">CALORIES FROM REAL MOVEMENT</div><h2>TRAINING LOG</h2></div></div>
+    <div id="logBody" style="margin-top: 24px; overflow-y: auto; min-height: 0;"></div>
+    <div class="bar bottom"><div class="keys"><span><kbd>ESC</kbd>BACK</span></div><div class="btns"><button id="btnLogBack" class="ghost">BACK</button></div></div>
+  </div>
+
+  <!-- ===== PAUSE ===== -->
+  <div id="pause" class="screen center hidden">
+    <div class="card">
+      <div class="kicker">PAUSED</div>
+      <h2>BLITZ</h2>
+      <div class="btns col"><button id="btnResume" class="primary">RESUME</button><button id="btnPauseMenu" class="ghost">QUIT TO MENU</button></div>
+    </div>
+  </div>
+
+  <!-- ===== FIGHT INTRO ===== -->
+  <div id="intro" class="screen center hidden">
+    <div class="vs">
+      <div class="side you"><div class="name">YOU</div><div class="sub">CHALLENGER</div></div>
+      <div class="mid"><div class="v">VS</div><div class="stage" id="introStage">K.O. MART WATERFRONT</div><div class="rank" id="introRank">RANK 01</div></div>
+      <div class="side foe"><div class="name">SOL VEGA</div><div class="sub">CHAMPION</div></div>
+    </div>
+  </div>
+
+  <!-- ===== RESULT ===== -->
+  <div id="end" class="screen center hidden">
+    <div class="card wide">
+      <div class="kicker" id="endKicker">RESULT</div>
+      <h1 id="endTitle">VICTORY</h1>
+      <p id="endStats" class="stats-line"></p>
+      <div class="btns">
+        <button id="btnNext" class="primary">NEXT RANK</button>
+        <button id="btnRematch" class="primary">REMATCH</button>
+        <button id="btnMenu" class="ghost">MENU</button>
+      </div>
+    </div>
+  </div>
+
+  <pre id="errlog" hidden></pre>
+</div>
+<script src="js/textures.js"></script>
+<script src="js/gesture.js"></script>
+<script src="js/game.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/pose.js"></script>
+<script src="js/assets.js"></script>
+<script src="js/arenas.js"></script>
+<script src="js/render.js"></script>
+<script src="js/opponent.js"></script>
+<script src="js/arms.js"></script>
+<script src="js/fitness.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

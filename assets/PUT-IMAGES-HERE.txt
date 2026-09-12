@@ -1,0 +1,10 @@
+Save the five images you pasted into this folder with EXACTLY these names:
+
+  boxer.png             the woman boxer, full body, transparent background (1024x1536)
+  arm-left.png          your LEFT arm + red glove, arm coming in from the bottom-right (1024x1536)
+  arm-right.png         your RIGHT arm + red glove, arm coming in from the bottom-left (1024x1536)
+  stage-waterfront.png  the pixel-art night waterfront with the K.O. MART sign (2172x724)
+  stage-rooftop.png     the rooftop fight yard with the chain-link fence and lanterns (1676x943)
+
+PNG with transparency for the boxer and the arms. Then reload the game: the menu status line
+tells you which files are still missing. Without them the game uses drawn fallbacks.

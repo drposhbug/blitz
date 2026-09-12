@@ -1,0 +1,211 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>arms</title>
+<!-- base points at the project root so assets.js finds assets/arm-*.png from here -->
+<base href="../">
+<style>
+  body { margin: 0; background: #0f1012; color: #e8e4dc; font: 13px "Segoe UI", system-ui, sans-serif; }
+  #bar { display: flex; gap: 6px; padding: 8px; flex-wrap: wrap; align-items: center; }
+  button { background: #1c1c22; color: #e8e4dc; border: 1px solid #444; padding: 6px 12px; cursor: pointer; font: inherit; }
+  button.on { background: #c8281e; border-color: #ff5a4a; }
+  canvas { display: block; background: #000; }
+  #info { padding: 6px 8px; color: #8c9199; white-space: pre; }
+</style></head><body>
+<div id="bar">
+  <button data-act="guard">guard</button>
+  <button data-act="jabL">jab L</button>
+  <button data-act="crossR">cross R</button>
+  <button data-act="block">block</button>
+  <button data-act="up">hands up</button>
+  <button data-act="hit">hit</button>
+  <button data-act="auto" id="autoBtn">auto loop</button>
+  <span id="assetNote"></span>
+</div>
+<canvas id="c" width="960" height="540"></canvas>
+<div id="info"></div>
+<script src="js/assets.js"></script>
+<script src="js/arms.js"></script>
+<script>
+(function () {
+  const W = 960, H = 540;
+  const canvas = document.getElementById('c'), ctx = canvas.getContext('2d');
+  const info = document.getElementById('info'), note = document.getElementById('assetNote');
+  const GUARD = { le: { f: 0.35, u: -0.3, l: 0 }, lw: { f: 0.55, u: 0.25, l: 0.05 }, re: { f: 0.35, u: -0.3, l: 0 }, rw: { f: 0.55, u: 0.25, l: -0.05 } };
+  const copy = o => JSON.parse(JSON.stringify(o));
+
+  // ---- synthetic pose driver (mirrors main.js armsFromKeys) ----
+  function makeDriver() {
+    const d = { mode: 'guard', punch: { L: 1e9, R: 1e9 }, hitAge: 1e9, arms: copy(GUARD), t: 0 };
+    d.act = a => {
+      if (a === 'guard' || a === 'block' || a === 'up') d.mode = a;
+      else if (a === 'jabL') d.punch.L = 0;
+      else if (a === 'crossR') d.punch.R = 0;
+      else if (a === 'hit') d.hitAge = 0;
+    };
+    d.step = dt => {
+      d.t += dt; d.hitAge += dt;
+      const tgt = copy(GUARD);
+      if (d.mode === 'block') { tgt.le = { f: 0.3, u: -0.1, l: 0.15 }; tgt.re = { f: 0.3, u: -0.1, l: -0.15 }; tgt.lw = { f: 0.45, u: 0.55, l: 0.45 }; tgt.rw = { f: 0.45, u: 0.55, l: -0.45 }; }
+      if (d.mode === 'up') { tgt.le = { f: 0.1, u: 0.7, l: 0 }; tgt.re = { f: 0.1, u: 0.7, l: 0 }; tgt.lw = { f: 0.15, u: 1.4, l: 0.1 }; tgt.rw = { f: 0.15, u: 1.4, l: -0.1 }; }
+      for (const h of ['L', 'R']) {
+        d.punch[h] += dt;
+        const a = d.punch[h];
+        if (a < 260) {
+          const k = a < 100 ? a / 100 : Math.max(0, 1 - (a - 100) / 160);
+          const e = h === 'L' ? tgt.le : tgt.re, w = h === 'L' ? tgt.lw : tgt.rw;
+          e.f += 0.55 * k; e.u += 0.35 * k; w.f += 1.15 * k; w.u += 0.05 * k; w.l += (h === 'L' ? 0.35 : -0.35) * k;
+        }
+      }
+      const k = Math.min(1, dt / 45);
+      for (const key in tgt) for (const c of ['f', 'u', 'l']) d.arms[key][c] += ((tgt[key][c] || 0) - (d.arms[key][c] || 0)) * k;
+      return d.arms;
+    };
+    d.opts = side => ({ block: d.mode === 'block', hit: d.hitAge < 260 ? 1 - d.hitAge / 260 : 0, t: d.t, punching: d.punch[side] < 260 });
+    return d;
+  }
+
+  // ---- synthetic stand-in images (?synth=1): 1024x1536 canvases laid out like the real assets, so the
+  // drawImage / offscreen-tint / forearm-stretch code paths run even before the PNGs are dropped in ----
+  function synthArm(side) {
+    const cv = document.createElement('canvas'); cv.width = 1024; cv.height = 1536; const c = cv.getContext('2d');
+    const g = ArmSprites.GEO[side];
+    c.lineCap = 'butt'; c.strokeStyle = '#d9a377'; c.lineWidth = 240; c.beginPath(); c.moveTo(g.glove.x, g.glove.y); c.lineTo(g.base.x, g.base.y); c.stroke();
+    c.strokeStyle = 'rgba(90,40,10,0.35)'; c.lineWidth = 40; c.beginPath(); c.moveTo(g.glove.x + 90, g.glove.y + 40); c.lineTo(g.base.x + (side === 'L' ? 80 : -80), g.base.y); c.stroke();
+    c.fillStyle = '#b3261b'; c.beginPath(); c.ellipse(g.glove.x, g.glove.y, g.r, g.r * 1.08, side === 'L' ? -0.5 : 0.5, 0, Math.PI * 2); c.fill();
+    c.fillStyle = 'rgba(255,255,255,0.25)'; c.beginPath(); c.ellipse(g.glove.x - 80, g.glove.y - 110, 90, 50, -0.6, 0, Math.PI * 2); c.fill();
+    c.strokeStyle = '#111'; c.lineWidth = 110; c.beginPath(); c.moveTo(g.glove.x + Math.cos(g.axis) * (g.r - 20), g.glove.y + Math.sin(g.axis) * (g.r - 20)); c.lineTo(g.glove.x + Math.cos(g.axis) * (g.r + 90), g.glove.y + Math.sin(g.axis) * (g.r + 90)); c.stroke();
+    c.fillStyle = '#fff'; c.font = '700 90px sans-serif'; c.textAlign = 'center'; c.fillText(side, g.glove.x, g.glove.y + 30);
+    return cv;
+  }
+  function useSynth() {
+    const synth = { armL: synthArm('L'), armR: synthArm('R') }, realGet = ASSETS.get;
+    ASSETS.get = name => synth[name] || realGet(name);
+  }
+
+  // ---- scene ----
+  const JAB_L = { f: 1.7, u: 0.3, l: 0.4 }, JAB_R = { f: 1.7, u: 0.3, l: -0.4 };
+  function background(c, drv, arms) {
+    const g = c.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#1b1c24'); g.addColorStop(0.45, '#2a2b33'); g.addColorStop(0.46, '#3a3230'); g.addColorStop(1, '#141210');
+    c.fillStyle = g; c.fillRect(0, 0, W, H);
+    // where a fully extended jab/cross lands + guard reference marks (dashed)
+    c.save(); c.strokeStyle = 'rgba(212,161,58,0.5)'; c.setLineDash([6, 6]); c.lineWidth = 2;
+    for (const side of ['L', 'R']) {
+      const p = ArmSprites.proj(side, side === 'L' ? JAB_L : JAB_R); c.beginPath(); c.arc(p.x, p.y, 40, 0, Math.PI * 2); c.stroke();
+      const q = ArmSprites.proj(side, side === 'L' ? GUARD.lw : GUARD.rw); c.beginPath(); c.arc(q.x, q.y, 8, 0, Math.PI * 2); c.stroke();
+    }
+    c.restore();
+    // raw (unsmoothed) wrist target as a small cross so lag/overshoot can be judged
+    c.save(); c.strokeStyle = 'rgba(232,228,220,0.6)'; c.lineWidth = 1.5;
+    for (const side of ['L', 'R']) { const st = arms.st[side]; c.beginPath(); c.moveTo(st.tx - 8, st.ty); c.lineTo(st.tx + 8, st.ty); c.moveTo(st.tx, st.ty - 8); c.lineTo(st.tx, st.ty + 8); c.stroke(); }
+    c.restore();
+  }
+  function frame(c, drv, arms, dt) {
+    const poses = drv.step(dt);
+    arms.update(dt, poses);
+    background(c, drv, arms);
+    for (const side of ['L', 'R']) {
+      const o = drv.opts(side);
+      if (!arms.draw(c, side, o)) arms.drawPlaceholder(c, side, o);
+    }
+    if (drv.opts('L').hit > 0) { c.fillStyle = `rgba(200,40,30,${0.25 * drv.opts('L').hit})`; c.fillRect(0, 0, W, H); }
+  }
+
+  // ---- self-check: 300 frames across every button, exceptions and non-finite state count as failures ----
+  function selfCheck() {
+    const hc = document.createElement('canvas'); hc.width = W; hc.height = H; const hctx = hc.getContext('2d');
+    const drv = makeDriver(), arms = new ArmSprites();
+    const acts = ['guard', 'jabL', 'crossR', 'block', 'up', 'hit'];
+    let fails = 0, drawn = 0;
+    for (let i = 0; i < 300; i++) {
+      try {
+        if (i % 50 === 0) drv.act(acts[(i / 50) | 0]);
+        if (i % 50 === 25) drv.act(i < 150 ? 'jabL' : 'crossR');   // punches on top of block / hands up / hit too
+        const poses = drv.step(16);
+        arms.update(16, poses);
+        hctx.clearRect(0, 0, W, H);
+        for (const side of ['L', 'R']) {
+          const o = drv.opts(side);
+          const ok = arms.draw(hctx, side, o);
+          if (typeof ok !== 'boolean') throw new Error('draw must return boolean');
+          if (ok) drawn++; else arms.drawPlaceholder(hctx, side, o);
+          const st = arms.st[side];
+          for (const k of ['px', 'py', 'vx', 'vy', 'rot', 'sc']) if (!Number.isFinite(st[k])) throw new Error(side + '.' + k + ' not finite at frame ' + i);
+          if (st.sc <= 0 || st.sc > 1) throw new Error(side + ' scale out of range ' + st.sc);
+          if (st.px < -200 || st.px > W + 200 || st.py < -300 || st.py > H + 300) throw new Error(side + ' glove off screen ' + st.px + ',' + st.py);
+        }
+        // the glove must actually travel on a punch: after 6 frames of jab the L glove is well above guard
+        if (i === 56 && !(arms.st.L.vy < -200)) throw new Error('jab L did not launch, vy=' + arms.st.L.vy);
+        if (i === 106 && !(arms.st.R.vy < -200)) throw new Error('cross R did not launch, vy=' + arms.st.R.vy);
+      } catch (e) { fails++; console.error('selfcheck frame ' + i, e); }
+    }
+    // draw() contract: false with no image, true with one
+    try { const has = !!ASSETS.get('armL'); const r = arms.draw(hctx, 'L', {}); if (r !== has) throw new Error('draw returned ' + r + ' with image ' + (has ? 'present' : 'missing')); } catch (e) { fails++; console.error(e); }
+    return { fails, drawn };
+  }
+
+  // ---- live page ----
+  const q = new URLSearchParams(location.search), at = q.get('at');
+  // self-check runs on the real assets first (placeholder path when missing), then again with synthetic images
+  const res = selfCheck();
+  const realGet = ASSETS.get; useSynth(); const resSynth = selfCheck();
+  if (!q.get('synth')) ASSETS.get = realGet;
+  const fails = res.fails + resSynth.fails + (resSynth.drawn === 600 ? 0 : 1);
+  document.title = fails === 0 ? 'PASS' : 'FAIL ' + fails;
+
+  const drv = makeDriver(), arms = new ArmSprites();
+  let auto = false, autoT = 0, autoHand = 'L', last = null, running = true;
+  document.querySelectorAll('#bar button').forEach(b => b.onclick = () => {
+    const a = b.dataset.act;
+    if (a === 'auto') { auto = !auto; b.classList.toggle('on', auto); return; }
+    drv.act(a);
+    document.querySelectorAll('#bar button[data-act]').forEach(x => { if (['guard', 'block', 'up'].includes(x.dataset.act)) x.classList.toggle('on', x.dataset.act === drv.mode); });
+  });
+  function tick(now) {
+    if (!running) return;
+    const dt = last === null ? 16 : Math.min(50, now - last); last = now;
+    if (auto) { autoT += dt; if (autoT >= 900) { autoT = 0; drv.act(autoHand === 'L' ? 'jabL' : 'crossR'); autoHand = autoHand === 'L' ? 'R' : 'L'; } }
+    frame(ctx, drv, arms, dt);
+    const gl = arms.glove('L'), gr = arms.glove('R');
+    info.textContent = `mode ${drv.mode}  L speed ${gl.speed.toFixed(0)} px/s  R speed ${gr.speed.toFixed(0)} px/s  L rot ${(arms.st.L.rot * 180 / Math.PI).toFixed(1)}deg  R rot ${(arms.st.R.rot * 180 / Math.PI).toFixed(1)}deg  squash L ${arms.st.L.squash.toFixed(0)} R ${arms.st.R.squash.toFixed(0)}  auto ${auto}`;
+    requestAnimationFrame(tick);
+  }
+  const report = () => { const m = ASSETS.missing().filter(k => k === 'armL' || k === 'armR'); note.textContent = q.get('synth') ? 'synthetic stand-in images (?synth=1)' : ASSETS.has('armL') && ASSETS.has('armR') ? 'arm images loaded' : 'placeholder arms (missing: ' + (m.length ? m.join(', ') : 'still loading') + ')'; };
+  ASSETS.onLoad(report); report();
+  window.__arms = { arms, drv, res, resSynth };
+
+  // deterministic still frame for headless screenshots: ?at=jab|cross|block|up|hit|impact|guard
+  // (fresh driver + sprites each time, so it can be re-rendered once the real images arrive)
+  function still() {
+    const sd = makeDriver(), sa = new ArmSprites();
+    for (let i = 0; i < 40; i++) frame(ctx, sd, sa, 16);
+    if (at === 'jab') { sd.act('jabL'); for (let i = 0; i < 6; i++) frame(ctx, sd, sa, 16); }
+    else if (at === 'cross') { sd.act('crossR'); for (let i = 0; i < 6; i++) frame(ctx, sd, sa, 16); }
+    else if (at === 'impact') { sd.act('jabL'); for (let i = 0; i < 9; i++) frame(ctx, sd, sa, 16); }
+    else if (at === 'block' || at === 'up' || at === 'guard') { sd.act(at); for (let i = 0; i < 40; i++) frame(ctx, sd, sa, 16); }
+    else if (at === 'hit') { sd.act('hit'); for (let i = 0; i < 4; i++) frame(ctx, sd, sa, 16); }
+    info.textContent = 'still frame: ' + at + '  L speed ' + sa.glove('L').speed.toFixed(0) + '  R speed ' + sa.glove('R').speed.toFixed(0) + '  L rot ' + (sa.st.L.rot * 180 / Math.PI).toFixed(1) + 'deg  R rot ' + (sa.st.R.rot * 180 / Math.PI).toFixed(1) + 'deg  stretch L ' + sa.st.L.stretch.toFixed(2) + ' R ' + sa.st.R.stretch.toFixed(2) + '  front ' + sa._front + '  images ' + (ASSETS.has('armL') && ASSETS.has('armR'));
+    window.__arms.still = sa;
+  }
+  // once both arm images have settled, run the self-check again on the real image path and refresh the still
+  let rechecked = false;
+  ASSETS.onLoad(() => {
+    if (rechecked || ASSETS.status('armL') === 'loading' || ASSETS.status('armR') === 'loading') return;
+    rechecked = true;
+    if (!q.get('synth')) {
+      const resReal = selfCheck();
+      window.__arms.resReal = resReal;
+      const f2 = fails + resReal.fails + (ASSETS.has('armL') && ASSETS.has('armR') && resReal.drawn !== 600 ? 1 : 0);
+      document.title = f2 === 0 ? 'PASS' : 'FAIL ' + f2;
+    }
+    if (at) still();
+  });
+
+  if (at) {
+    still();
+    running = false;
+  } else {
+    auto = true; document.getElementById('autoBtn').classList.add('on');
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body></html>

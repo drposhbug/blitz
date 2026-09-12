@@ -1,0 +1,304 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>RUNNING</title>
+<style>body{font:14px monospace;background:#111;color:#eee;padding:16px}.ok{color:#5f5}.bad{color:#f55}</style>
+</head><body><h2 id="h">tests</h2><pre id="out"></pre>
+<script src="../js/gesture.js"></script>
+<script src="../js/game.js"></script>
+<script>
+const out = [], fails = [];
+function test(name, fn) { try { fn(); out.push('<span class=ok>ok</span> ' + name); } catch (e) { fails.push(name); out.push('<span class=bad>FAIL</span> ' + name + ' :: ' + (e.message || e)); } }
+function eq(a, b, msg) { if (a !== b) throw new Error((msg || '') + ' expected ' + JSON.stringify(b) + ' got ' + JSON.stringify(a)); }
+function ok(v, msg) { if (!v) throw new Error(msg || 'expected truthy'); }
+function near(a, b, tol, msg) { if (Math.abs(a - b) > tol) throw new Error((msg || '') + ' expected ~' + b + ' got ' + a); }
+
+// ---------- synthetic pose ----------
+// Person facing camera, image coords. sw = shoulder width. Person's LEFT shoulder is at image-right (x = cx + sw/2).
+// o.vis sets every landmark's visibility (default 1), o.shVis overrides the shoulders, a wrist object may carry its own `visibility`.
+function pose(o) {
+  o = Object.assign({ cx: 0.5, cy: 0.5, sw: 0.25, noseDy: -0.7, hipDy: 1.6, lw: null, rw: null, vis: 1, shVis: null }, o || {});
+  const sw = o.sw, cx = o.cx, cy = o.cy, v = o.vis, sv = o.shVis == null ? v : o.shVis;
+  const lm = Array.from({ length: 33 }, () => ({ x: cx, y: cy, z: 0, visibility: v }));
+  lm[0] = { x: cx, y: cy + o.noseDy * sw, z: -0.1, visibility: v };
+  lm[11] = { x: cx + sw / 2, y: cy, z: 0, visibility: sv }; lm[12] = { x: cx - sw / 2, y: cy, z: 0, visibility: sv };
+  lm[13] = { x: cx + sw * 0.8, y: cy + sw * 0.5, z: 0, visibility: v }; lm[14] = { x: cx - sw * 0.8, y: cy + sw * 0.5, z: 0, visibility: v };
+  lm[15] = Object.assign({ visibility: v }, o.lw || { x: cx + sw * 0.3, y: cy - sw * 0.25, z: -0.05 });
+  lm[16] = Object.assign({ visibility: v }, o.rw || { x: cx - sw * 0.3, y: cy - sw * 0.25, z: -0.05 });
+  lm[23] = { x: cx + sw / 2.5, y: cy + o.hipDy * sw, z: 0, visibility: v }; lm[24] = { x: cx - sw / 2.5, y: cy + o.hipDy * sw, z: 0, visibility: v };
+  return lm;
+}
+// World landmarks: metres, hip-centred, y down, z toward the camera negative, 0.4 m shoulders.
+// o.yaw (radians) turns the torso about the vertical axis; o.lw / o.rw override the wrists.
+function world(o) {
+  o = Object.assign({ yaw: 0, lw: null, rw: null, vis: 1 }, o || {});
+  const c = Math.cos(o.yaw), s = Math.sin(o.yaw), v = o.vis;
+  const rot = (x, y, z) => ({ x: x * c - z * s, y, z: z * c + x * s, visibility: v });
+  const w = Array.from({ length: 33 }, () => rot(0, 0, 0));
+  w[0] = rot(0, -0.72, -0.08);
+  w[11] = rot(0.2, -0.5, 0); w[12] = rot(-0.2, -0.5, 0);
+  w[13] = rot(0.32, -0.3, 0); w[14] = rot(-0.32, -0.3, 0);
+  w[15] = Object.assign({ visibility: v }, o.lw || { x: 0.12, y: -0.6, z: -0.2 }); w[16] = Object.assign({ visibility: v }, o.rw || { x: -0.12, y: -0.6, z: -0.2 });
+  w[23] = rot(0.14, 0, 0); w[24] = rot(-0.14, 0, 0);
+  return w;
+}
+function calibrated(withWorld) { const g = new GestureDetector(); let t = 0; for (let i = 0; i < 20; i++) g.update(pose(), t += 33, withWorld ? world() : undefined); return { g, t }; }
+const punches = ev => ev.filter(e => e.type === 'punch');
+// a straight: the wrist drives toward the camera (z) and out from the shoulder; k = 0 guard, 1 extended
+const straight = (hand, k, sw) => { const s = hand === 'L' ? 1 : -1; return { x: 0.5 + s * sw * (0.3 + 0.9 * k), y: 0.5 - sw * 0.35, z: -0.05 - 0.35 * k }; };
+// throw one left-hand motion over 4 frames (~130 ms) then hold; returns punches and the frame index of the first
+function throwLeft(g, fn, frames) { let t = 660, ev = [], fireAt = -1; for (let i = 0; i < (frames || 12); i++) { const e = g.update(pose({ lw: fn(Math.min(1, i / 4)) }), t += 33); if (fireAt < 0 && punches(e).length) fireAt = i; ev = ev.concat(e); } return { p: punches(ev), fireAt, t }; }
+
+test('gesture: calibrates after enough neutral frames', () => {
+  const g = new GestureDetector(); let t = 0, ev = [];
+  for (let i = 0; i < 20; i++) ev = ev.concat(g.update(pose(), t += 33));
+  ok(g.calibrated, 'calibrated'); eq(ev.filter(e => e.type === 'calibrated').length, 1);
+  near(g.state.x, 0, 0.05); near(g.state.z, 0, 0.05); eq(g.state.duck, false); eq(g.state.block, false);
+});
+test('gesture: no landmarks -> not tracking, no events', () => {
+  const { g, t } = calibrated(); const ev = g.update(null, t + 33);
+  eq(ev.length, 0); eq(g.state.tracking, false);
+});
+test('gesture: fast left extension is one left punch, fired within 3 frames of the motion starting', () => {
+  const { g } = calibrated();
+  const { p, fireAt } = throwLeft(g, k => straight('L', k, 0.25)); // motion starts on frame 1
+  eq(p.length, 1, 'punch count'); eq(p[0].hand, 'L'); ok(p[0].power >= 1 && p[0].power <= 2, 'power ' + p[0].power);
+  ok(fireAt >= 1 && fireAt <= 3, 'fired on frame ' + fireAt);
+});
+test('gesture: right hand punch is hand R', () => {
+  const { g } = calibrated(); let t = 660, ev = [];
+  for (let i = 0; i < 12; i++) ev = ev.concat(g.update(pose({ rw: straight('R', Math.min(1, i / 4), 0.25) }), t += 33));
+  const p = punches(ev); eq(p.length, 1); eq(p[0].hand, 'R');
+});
+test('gesture: slow extension is not a punch', () => {
+  const { g } = calibrated(); let t = 660, ev = [];
+  for (let i = 0; i < 40; i++) ev = ev.concat(g.update(pose({ lw: straight('L', i / 39, 0.25) }), t += 33));
+  eq(punches(ev).length, 0);
+});
+test('gesture: a second punch needs the arm back first (hysteresis), then fires again', () => {
+  const { g } = calibrated(); let t = 660, ev = [];
+  const sw = 0.25;
+  for (let i = 0; i < 8; i++) ev = ev.concat(g.update(pose({ lw: straight('L', Math.min(1, i / 4), sw) }), t += 33));
+  eq(punches(ev).length, 1, 'first');
+  // shove the already-extended arm further out just as fast: not a new punch
+  for (let i = 0; i < 8; i++) ev = ev.concat(g.update(pose({ lw: straight('L', 1 + 0.6 * Math.min(1, i / 4), sw) }), t += 33));
+  eq(punches(ev).length, 1, 'no re-fire while extended');
+  // bring it home, then punch again
+  for (let i = 0; i < 8; i++) ev = ev.concat(g.update(pose({ lw: straight('L', 1.6 * Math.max(0, 1 - i / 4), sw) }), t += 33));
+  for (let i = 0; i < 8; i++) ev = ev.concat(g.update(pose({ lw: straight('L', Math.min(1, i / 4), sw) }), t += 33));
+  eq(punches(ev).length, 2, 'second');
+});
+test('gesture: walking sideways with both arms swinging is not a punch, but still walks you', () => {
+  const { g } = calibrated(); let t = 660, ev = [];
+  const sw = 0.25;
+  for (let i = 0; i < 15; i++) {
+    const cx = 0.5 - 0.03 * i;                       // a brisk step, ~0.9 frame widths per second
+    const swing = Math.sin(i / 3) * 0.15 * sw;       // arms swinging a little with the stride
+    const lw = { x: cx + sw * 0.3 + swing, y: 0.5 - sw * 0.25, z: -0.05 - swing };
+    const rw = { x: cx - sw * 0.3 - swing, y: 0.5 - sw * 0.25, z: -0.05 + swing };
+    ev = ev.concat(g.update(pose({ cx, lw, rw }), t += 33));
+  }
+  eq(punches(ev).length, 0);
+  ok(g.state.x > 0.5, 'still walks: x=' + g.state.x);
+});
+test('gesture: hook, straight and uppercut are told apart by where the wrist travels', () => {
+  const sw = 0.25;
+  let r = throwLeft(calibrated().g, k => ({ x: 0.5 + sw * (0.3 + 1.5 * k), y: 0.5 - sw * 0.3, z: -0.05 - 0.05 * k }));   // sweeps across
+  eq(r.p.length, 1, 'hook count'); eq(r.p[0].kind, 'hook');
+  r = throwLeft(calibrated().g, k => ({ x: 0.5 + sw * (0.3 + 0.1 * k), y: 0.5 - sw * 0.3, z: -0.05 - 0.6 * k }));        // drives at the camera
+  eq(r.p.length, 1, 'straight count'); eq(r.p[0].kind, 'straight');
+  r = throwLeft(calibrated().g, k => ({ x: 0.5 + sw * 0.3, y: 0.5 - sw * (0.25 + 1.1 * k), z: -0.05 - 0.15 * k }));       // rises
+  eq(r.p.length, 1, 'uppercut count'); eq(r.p[0].kind, 'uppercut');
+});
+test('gesture: a wrist the model cannot see (visibility < 0.5) never punches; unseen shoulders = not tracking', () => {
+  const { g } = calibrated();
+  const r = throwLeft(g, k => Object.assign(straight('L', k, 0.25), { visibility: 0.3 }));
+  eq(r.p.length, 0); eq(g.state.tracking, true);
+  let t = r.t;
+  const ev = g.update(pose({ shVis: 0.2 }), t += 33);
+  eq(ev.length, 0); eq(g.state.tracking, false);
+  g.update(pose(), t += 33); eq(g.state.tracking, true, 'recovers');
+});
+test('gesture: one glitch frame does not move you (median of the last 5 frames); a real step still does', () => {
+  const { g } = calibrated(); let t = 660;
+  g.update(pose({ cx: 0.8 }), t += 33); near(g.state.x, 0, 0.02, 'glitch frame');
+  for (let i = 0; i < 4; i++) { g.update(pose(), t += 33); near(g.state.x, 0, 0.02, 'after glitch ' + i); }
+  for (let i = 0; i < 6; i++) g.update(pose({ cx: 0.3 }), t += 33);
+  ok(g.state.x > 0.5, 'real step x=' + g.state.x);
+});
+test('gesture: stepping to your right (image-left) reads as x positive (mirrored)', () => {
+  const { g } = calibrated(); let t = 660;
+  for (let i = 0; i < 10; i++) g.update(pose({ cx: 0.5 - 0.2 }), t += 33);
+  ok(g.state.x > 0.6, 'x=' + g.state.x);
+});
+test('gesture: stepping to your left reads x negative and clamps at -1', () => {
+  const { g } = calibrated(); let t = 660;
+  for (let i = 0; i < 10; i++) g.update(pose({ cx: 0.5 + 0.4 }), t += 33);
+  eq(g.state.x, -1);
+});
+test('gesture: stepping toward the camera (bigger shoulders) is z positive, away is negative', () => {
+  let { g } = calibrated(); let t = 660;
+  for (let i = 0; i < 10; i++) g.update(pose({ sw: 0.25 * 1.2 }), t += 33);
+  ok(g.state.z > 0.6, 'z=' + g.state.z);
+  g = calibrated().g; t = 660;
+  for (let i = 0; i < 10; i++) g.update(pose({ sw: 0.25 * 0.8 }), t += 33);
+  ok(g.state.z < -0.6, 'z=' + g.state.z);
+});
+// (was 'crouch is a duck' with only the nose dropping: a nose-only drop is a head tilt, which must NOT duck any more)
+test('gesture: crouching (shoulders and hips drop) is a duck; a head tilt is not', () => {
+  let { g } = calibrated(); let t = 660;
+  for (let i = 0; i < 8; i++) g.update(pose({ cy: 0.5 + 0.25 * 0.6 }), t += 33);
+  eq(g.state.duck, true, 'crouch');
+  g = calibrated().g; t = 660;
+  for (let i = 0; i < 8; i++) g.update(pose({ noseDy: -0.7 + 0.7 }), t += 33);
+  eq(g.state.duck, false, 'head tilt');
+});
+test('gesture: a hip drop alone (sitting back into the knees) is a duck', () => {
+  const { g } = calibrated(); let t = 660;
+  for (let i = 0; i < 8; i++) g.update(pose({ hipDy: 1.6 + 0.5 }), t += 33);
+  eq(g.state.duck, true);
+});
+test('gesture: fists at face is block, and blocks punches; a chin guard is not', () => {
+  const { g } = calibrated(); let t = 660, ev = [];
+  const sw = 0.25;
+  eq(g.state.block, false, 'guard');
+  const lw = { x: 0.5 + sw * 0.25, y: 0.5 - sw * 0.6, z: -0.1 }, rw = { x: 0.5 - sw * 0.25, y: 0.5 - sw * 0.6, z: -0.1 };
+  for (let i = 0; i < 8; i++) ev = ev.concat(g.update(pose({ lw, rw }), t += 33));
+  eq(g.state.block, true); eq(punches(ev).length, 0);
+});
+test('gesture: both hands over head is handsUp', () => {
+  const { g } = calibrated(); let t = 660;
+  const sw = 0.25;
+  const lw = { x: 0.5 + sw * 0.4, y: 0.5 - sw * 1.6, z: 0 }, rw = { x: 0.5 - sw * 0.4, y: 0.5 - sw * 1.6, z: 0 };
+  for (let i = 0; i < 8; i++) g.update(pose({ lw, rw }), t += 33);
+  eq(g.state.handsUp, true);
+});
+test('gesture: world landmarks (metres) drive punches at m/s and yaw-correct depth', () => {
+  let { g } = calibrated(true); let t = 660, ev = [];
+  for (let i = 0; i < 12; i++) {
+    const k = Math.min(1, i / 4);
+    ev = ev.concat(g.update(pose({ lw: straight('L', k, 0.25) }), t += 33, world({ lw: { x: 0.12 + 0.1 * k, y: -0.6, z: -0.2 - 0.4 * k } })));
+  }
+  const p = punches(ev); eq(p.length, 1, 'count'); eq(p[0].hand, 'L'); eq(p[0].kind, 'straight'); ok(p[0].power > 1, 'power ' + p[0].power);
+  // torso turned 40 degrees: the image shoulder width shrinks 23% but you have not moved
+  const yaw = 40 * Math.PI / 180;
+  g = calibrated(true).g; t = 660;
+  for (let i = 0; i < 10; i++) g.update(pose({ sw: 0.25 * Math.cos(yaw) }), t += 33, world({ yaw }));
+  near(g.state.z, 0, 0.2, 'yaw-corrected z');
+  g = calibrated().g; t = 660;
+  for (let i = 0; i < 10; i++) g.update(pose({ sw: 0.25 * Math.cos(yaw) }), t += 33);
+  ok(g.state.z < -0.5, 'without world landmarks the turn reads as stepping back: z=' + g.state.z);
+});
+
+// ---------- fight ----------
+function run(f, ms, input) { let ev = []; for (let t = 0; t < ms; t += 16) { f.update(16, input); ev = ev.concat(f.drain()); } return ev; }
+const has = (ev, type, text) => ev.some(e => e.type === type && (text === undefined || e.text === text || e.name === text));
+const STILL = { mx: 0, mz: 0, duck: false, block: false, handsUp: false };
+const inp = extra => Object.assign({}, STILL, extra || {});
+// put doge right in front of you, in reach, along your facing
+function close(f, dist) { const p = f.player, d = dist || ARENA.REACH * 0.8; f.npc.x = p.x + Math.sin(p.yaw) * d; f.npc.z = p.z + Math.cos(p.yaw) * d; }
+function mk(rng) { const f = new Fight({ level: 1, rng: rng || (() => 0.5) }); f.drain(); return f; }
+
+test('fight: starts with bell and FIGHT!, doge in front, out of reach', () => {
+  const f = new Fight({ level: 1, rng: () => 0.5 }); const ev = f.drain();
+  ok(has(ev, 'announce', 'FIGHT!')); ok(has(ev, 'sfx', 'bell')); eq(f.npc.state, 'intro');
+  ok(f.rel.fwd > 0.5, 'in front'); near(f.rel.lat, 0, 0.01); eq(f.inRange(), false);
+});
+test('fight: doge walks up to you and only attacks once in reach; standing still gets you hit', () => {
+  const f = mk();
+  run(f, 1500, STILL); eq(f.npc.state, 'idle');
+  const d0 = f.rel.dist;
+  run(f, 400, STILL); ok(f.rel.dist < d0, 'doge approached');
+  const ev = run(f, 6000, STILL);
+  ok(f.npc.attacksThrown >= 1, 'attacked');
+  ok(has(ev, 'announce', 'NO DODGE!'), 'standing still gets hit'); ok(f.player.hp < 100);
+});
+test('fight: walking forward (W) closes the distance, back (S) opens it', () => {
+  const f = mk(); f._setNpc('intro', 1e9);
+  const d0 = f.rel.dist; run(f, 300, inp({ mz: 1 })); ok(f.rel.dist < d0 - 0.3, 'closer: ' + f.rel.dist);
+  const d1 = f.rel.dist; run(f, 300, inp({ mz: -1 })); ok(f.rel.dist > d1 + 0.3, 'farther');
+});
+test('fight: your eyes follow doge as he circles, so he stays in front', () => {
+  const f = mk(); f._setNpc('intro', 1e9);
+  f.npc.x = f.player.x + 0.9; f.npc.z = f.player.z; // to your right
+  ok(Math.abs(f.rel.lat) > 0.8, 'starts to the side');
+  run(f, 800, STILL);
+  ok(Math.abs(f.rel.lat) < 0.1 && f.rel.fwd > 0.8, 'turned to face him: lat=' + f.rel.lat + ' fwd=' + f.rel.fwd);
+});
+test('fight: eyes do NOT turn while doge is mid-punch, so a sidestep takes you off his line', () => {
+  const f = mk(); close(f); f._setNpc('windup', 1000, 'jab');
+  run(f, 700, inp({ mx: 1 })); // most of her wind-up spent stepping right (strafe is slower than forward steps)
+  ok(Math.abs(f.rel.lat) > ARENA.LANE, 'off his line: lat=' + f.rel.lat);
+  f._setNpc('strike', 170, 'jab');
+  const ev = run(f, 200, STILL);
+  ok(has(ev, 'announce', 'DODGE!'), 'sidestep dodge'); eq(f.player.hp, 100); eq(f.npc.state, 'stun'); eq(f.player.super, 25);
+});
+test('fight: stepping back out of reach before the strike lands is a DODGE', () => {
+  const f = mk(); close(f); f._setNpc('strike', 170, 'jab');
+  const ev = run(f, 200, inp({ mz: -1 }));
+  ok(has(ev, 'announce', 'DODGE!')); ok(has(ev, 'sfx', 'dodge')); ok(has(ev, 'slowmo'));
+});
+test('fight: ducking beats high punches but not the overhead or body blow', () => {
+  let f = mk(); close(f); f._setNpc('strike', 170, 'jab');
+  let ev = run(f, 200, inp({ duck: true })); ok(has(ev, 'announce', 'DODGE!'), 'jab ducked');
+  f = mk(); close(f); f._setNpc('strike', 170, 'overhead');
+  ev = run(f, 200, inp({ duck: true })); ok(has(ev, 'announce', 'NO DODGE!'), 'overhead not duckable'); eq(f.player.hp, 84);
+  f = mk(); close(f); f._setNpc('strike', 170, 'body');
+  ev = run(f, 200, inp({ duck: true })); ok(has(ev, 'announce', 'NO DODGE!'), 'body blow not duckable');
+});
+test('fight: blocking a blockable punch takes chip damage only, blocking the overhead fails', () => {
+  let f = mk(); close(f); f._setNpc('strike', 170, 'jab');
+  let ev = run(f, 200, inp({ block: true })); ok(has(ev, 'announce', 'BLOCKED')); eq(f.player.hp, 98);
+  f = mk(); close(f); f._setNpc('strike', 170, 'overhead');
+  ev = run(f, 200, inp({ block: true })); ok(has(ev, 'announce', 'NO DODGE!'));
+});
+test('fight: punching from out of reach is a whiff', () => {
+  const f = mk(); f._setNpc('idle', 1000); f.drain();
+  eq(f.punch('L', 1), 'whiff'); eq(f.npc.hp, 100); eq(f.player.whiffs, 1);
+  ok(has(f.drain(), 'float'));
+});
+test('fight: punching a stunned doge in reach is a crit', () => {
+  const f = mk(); close(f); f._setNpc('stun', 1000); f.drain();
+  eq(f.punch('L', 1), 'crit'); eq(f.npc.hp, 100 - 17); eq(f.player.combo, 1);
+  ok(has(f.drain(), 'sfx', 'crit'));
+});
+test('fight: idle doge guards when rng says so, otherwise gets hit and knocked back', () => {
+  let f = mk(() => 0.1); close(f); f._setNpc('idle', 1000); f.drain();
+  eq(f.punch('R', 1), 'guarded'); eq(f.npc.hp, 98); eq(f.player.combo, 0);
+  f = mk(() => 0.9); close(f); f._setNpc('idle', 1000); f.drain();
+  const d0 = f.rel.dist;
+  eq(f.punch('R', 1), 'hit'); eq(f.npc.hp, 93); eq(f.npc.state, 'hurt'); ok(f.rel.dist > d0, 'knocked back');
+});
+test('fight: early punch into a windup can counter; late punch does not stop it', () => {
+  let f = mk(() => 0.1); close(f); f._setNpc('windup', 700, 'jab'); f.drain();
+  eq(f.punch('R', 1), 'counter'); eq(f.npc.state, 'stun'); ok(has(f.drain(), 'announce', 'COUNTER!'));
+  f = mk(() => 0.1); close(f); f._setNpc('windup', 700, 'jab'); run(f, 400, STILL);
+  eq(f.punch('R', 1), 'hit'); eq(f.npc.state, 'windup');
+});
+test('fight: full meter + hands up = HAYMAKER', () => {
+  const f = mk(); close(f); f._setNpc('idle', 5000); f.player.super = 100;
+  const ev = run(f, 400, inp({ handsUp: true }));
+  ok(has(ev, 'announce', 'HAYMAKER')); eq(f.npc.hp, 70); eq(f.player.super, 0); eq(f.npc.state, 'stun');
+});
+test('fight: fighters never overlap and never leave the ring', () => {
+  const f = mk(); f._setNpc('idle', 5000);
+  run(f, 3000, inp({ mz: 1 })); // walk straight into him until you hit the far ropes
+  ok(f.rel.dist >= ARENA.MIN_GAP - 1e-6, 'gap=' + f.rel.dist);
+  ok(Math.hypot(f.npc.x, f.npc.z) <= ARENA.RING + 1e-6, 'doge inside ring');
+  ok(Math.hypot(f.player.x, f.player.z) <= ARENA.RING, 'you inside ring');
+});
+test('fight: KO doge -> win; getting KOd -> lose', () => {
+  let f = mk(); close(f); f._setNpc('stun', 1000); f.npc.hp = 5; f.drain();
+  f.punch('L', 1); let ev = f.drain();
+  eq(f.over, 'win'); ok(has(ev, 'announce', 'K.O.')); ok(ev.some(e => e.type === 'over' && e.result === 'win')); eq(f.punch('L', 1), 'over');
+  f = mk(); close(f); f.player.hp = 3; f._setNpc('strike', 170, 'jab');
+  ev = run(f, 200, STILL);
+  eq(f.over, 'lose'); ok(has(ev, 'announce', 'YOU ARE OUT')); ok(ev.some(e => e.type === 'over' && e.result === 'lose'));
+});
+test('fight: higher level = faster windups, walks faster, more attacks', () => {
+  const a = new Fight({ level: 1 }), b = new Fight({ level: 6 });
+  ok(b.speed < a.speed); ok(b.pool.length > a.pool.length); ok(b.guardChance > a.guardChance); ok(b.walkSpeed > a.walkSpeed);
+});
+
+document.getElementById('out').innerHTML = out.join('\n');
+document.getElementById('h').textContent = fails.length ? 'FAIL ' + fails.length : 'PASS ' + out.length;
+document.title = fails.length ? 'FAIL ' + fails.length : 'PASS';
+</script></body></html>

@@ -1,0 +1,314 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>RUNNING</title>
+<style>
+  body { margin: 0; padding: 24px; background: #0f1012; color: #e8e4dc; font: 13px/1.5 "Segoe UI", system-ui, sans-serif; }
+  #app { position: relative; width: 900px; height: 220px; background: #1a1c20; border: 1px solid rgba(232,228,220,.14); margin-bottom: 22px; }
+  #app .fake { position: absolute; left: 14px; top: 14px; font: 600 11px "Segoe UI", sans-serif; letter-spacing: .22em; color: #8c9199; }
+  #sum { margin: 0 0 22px; }
+  #logwrap { width: 900px; }
+  pre#log { margin-top: 22px; font: 12px/1.5 Consolas, monospace; color: #cfcbc3; white-space: pre-wrap; }
+  pre#log .f { color: #ff5a4a; }
+</style></head><body>
+<div id="app"><div class="fake">HUD WIDGET MOUNTED IN A FAKE #app</div></div>
+<div id="sum"></div>
+<div id="logwrap"></div>
+<pre id="log"></pre>
+<script src="../js/fitness.js"></script>
+<script>
+(function () {
+  const logEl = document.getElementById('log');
+  const fails = [];
+  const log = m => logEl.textContent += m + '\n';
+  const check = (c, m) => { if (!c) fails.push(m); log((c ? 'ok   ' : 'FAIL ') + m); };
+  const near = (a, b, tol) => Math.abs(a - b) <= tol;
+  const pad2 = n => ('0' + n).slice(-2);
+  const dateKey = t => { const d = new Date(t); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); };
+  const W = 75;
+  const kcalPerMetMs = W * 3.5 / 200 / 60000;                 // kcal per (MET * ms) at 75 kg
+  const punchKcal = v => 0.5 * 0.053 * W * Math.min(10, v) * Math.min(10, v) / 4184 * 4; // documented punch burst
+  try {
+    // ---- fresh, seeded storage so the log has a few past days to draw ----
+    let seed = null;
+    try {
+      const now = Date.now(); seed = [];
+      const mk = (daysAgo, hh, kcal, mins, punches, result, stage, rank) => { const t = now - daysAgo * 86400000; const d = new Date(t); d.setHours(hh, 12, 0, 0); return { startedAt: d.getTime(), endedAt: d.getTime() + mins * 60000, date: dateKey(d.getTime()), stage, rank, mode: 'cam', result, kcal, activeMs: mins * 60000 * 0.6, totalMs: mins * 60000, punches, punchesLanded: Math.round(punches * .7), dodges: 5, ducks: 3, hitsTaken: 4, supers: 1, distance: 30, peakIntensity: .8, avgIntensity: .45 }; };
+      seed.push(mk(6, 18, 22.4, 3.2, 44, 'lose', 'BACKSTREET', 1));
+      seed.push(mk(5, 19, 31.0, 4.1, 61, 'win', 'BACKSTREET', 1));
+      seed.push(mk(3, 20, 18.7, 2.6, 38, 'win', 'SHRINE', 2));
+      seed.push(mk(3, 20, 26.2, 3.5, 52, 'lose', 'TEMPLE', 3));
+      seed.push(mk(1, 7, 40.5, 5.0, 77, 'win', 'TEMPLE', 3));
+      localStorage.setItem('dogefight.fitness', JSON.stringify(seed));
+      localStorage.removeItem('dogefight.fitness.settings');
+    } catch (e) { log('note: localStorage unavailable (' + e.message + ') - persistence checks will be skipped'); }
+    const reseed = () => { try { if (seed) localStorage.setItem('dogefight.fitness', JSON.stringify(seed)); } catch (e) {} };
+
+    check(typeof window.Fitness === 'function', 'window.Fitness is a constructor');
+    check(window.Fitness.live && window.Fitness.live.on === false && window.Fitness.live.label === 'LOW', 'Fitness.live global exists and is off before any session');
+    const fit = new Fitness({ weightKg: W, heightCm: 175 });
+    check(fit.weightKg === 75, 'weight setting applied');
+    fit.setWeight(80); check(fit.weightKg === 80, 'setWeight updates weight'); fit.setWeight(W);
+
+    // ---- HUD widget still works (the game itself draws Fitness.live on the canvas) ----
+    const hud = fit.mountHud(document.getElementById('app'));
+    check(hud && hud.classList.contains('fit-hud') && hud.parentNode === document.getElementById('app'), 'mountHud creates a .fit-hud element inside the container');
+    check(!!document.getElementById('fit-style'), 'styles injected once as <style id="fit-style">');
+
+    // =====================================================================================
+    // A. keyboard path (no pose): exact check against the documented no-kinematics model
+    //    10 s cycle: 4 s standing guard, 4 s moving at 0.7, 1 s full stick + duck, 1 s block.
+    //    40 punches (power alternating 1 and 2), 6 dodges, 4 hits taken, 1 super, tracking lost the last 6 s.
+    // =====================================================================================
+    {
+      const kb = new Fitness({ weightKg: W });
+      kb.startSession({ stage: 'KB', rank: 1, mode: 'kb' });
+      const DT = 16, TOTAL = 180000;
+      let t = 0, punches = 0, dodges = 0, hits = 0, supers = 0, wasDuck = false;
+      let expMetMs = 0, expBurst = 0; const boosts = [];
+      let sawHigh = false, sawLow = false, metWhenLost = null;
+      const punchEvery = TOTAL / 40, dodgeEvery = TOTAL / 6;
+      let nextPunch = 2000, nextDodge = 9000, nextHit = 25000;
+      while (t < TOTAL) {
+        const phase = (t % 10000) / 1000;
+        let s;
+        if (phase < 4) s = { moving: 0, duck: false, block: false, handsUp: false, tracking: true };
+        else if (phase < 8) s = { moving: 0.7, duck: false, block: false, handsUp: false, tracking: true };
+        else if (phase < 9) s = { moving: 1.0, duck: true, block: false, handsUp: false, tracking: true };
+        else s = { moving: 0, duck: false, block: true, handsUp: false, tracking: true };
+        if (t >= TOTAL - 6000) s = { moving: 0, duck: false, block: false, handsUp: false, tracking: false };
+        const tNow = t + DT;                              // the module's clock after this tick
+        if (s.duck && !wasDuck) boosts.push(tNow); wasDuck = s.duck;
+        const nBoost = boosts.filter(b => tNow - b < 6000).length;
+        kb.tick(DT, s);
+        const met = (s.tracking ? 2.0 : 1.3) + 2.5 * Math.pow(s.moving, 1.2) + (s.duck ? 1 : 0) + Math.min(3, nBoost) * 1.5;
+        expMetMs += met * DT;
+        if (!s.tracking) metWhenLost = kb.terms.base;
+        t += DT;
+        if (t >= nextPunch && punches < 40) {
+          const power = punches % 2 ? 2 : 1, result = ['hit', 'crit', 'guarded', 'whiff', 'counter'][punches % 5];
+          kb.event('punch', { hand: punches % 2 ? 'R' : 'L', power, result });
+          expBurst += punchKcal(3.5 + 2 * power); punches++; nextPunch += punchEvery;
+        }
+        if (t >= nextDodge && dodges < 6) { kb.event('dodge', { how: dodges % 2 ? 'duck' : 'footwork' }); expBurst += 0.05 * W / 70; dodges++; nextDodge += dodgeEvery; }
+        if (t >= nextHit && hits < 4) { kb.event('hitTaken', { dmg: 8 }); hits++; nextHit += 40000; }
+        if (t >= 100000 && !supers) { kb.event('super'); expBurst += 0.1 * W / 70; supers++; }
+        if (kb.met >= 6) sawHigh = true;
+        if (kb.met < 3) sawLow = true;
+      }
+      const expMet = expMetMs * kcalPerMetMs, expected = expMet + expBurst, live = kb.session;
+      log('     keyboard model: MET integral ' + expMet.toFixed(2) + ' kcal + bursts ' + expBurst.toFixed(2) + ' kcal = ' + expected.toFixed(2) + ' kcal expected; module says ' + live.kcal.toFixed(2));
+      check(near(live.kcal, expected, 0.05 + expected * 0.01), 'keyboard: kcal matches the documented no-pose model within 1% (' + live.kcal.toFixed(2) + ' vs ' + expected.toFixed(2) + ')');
+      check(live.kcal >= 10 && live.kcal <= 45, 'keyboard: kcal in the plausible 10-45 band for 3 min at 75 kg (' + live.kcal.toFixed(1) + ')');
+      check(near(live.totalMs, TOTAL, DT), 'keyboard: totalMs is ~180000 (' + live.totalMs + ')');
+      check(live.activeMs >= 90000 * 0.95 && live.activeMs < live.totalMs, 'keyboard: at least the moving/sprint half of the session counts as active (' + live.activeMs + ')');
+      check(live.punches === 40 && live.punchesLanded === 24 && live.dodges === 6 && live.hitsTaken === 4 && live.supers === 1, 'keyboard: punches / landed / dodges / hits / supers counted');
+      check(live.ducks === 17 && live.squats === 17, 'keyboard: ducks counted once per hold and each hold is one squat cycle (' + live.ducks + ')');
+      const expDist = (0.7 * 68 + 1.0 * 17) * 1.4;
+      check(near(live.distance, expDist, expDist * 0.02), 'keyboard: distance = moving * PSPEED integrated (' + live.distance.toFixed(1) + ' units)');
+      check(near(live.lostMs, 6000, DT), 'keyboard: tracking-lost time accounted (' + live.lostMs + ' ms)');
+      check(metWhenLost === 1.3, 'keyboard: base drops to 1.3 MET (standing quietly) when tracking is lost');
+      check(sawHigh && sawLow, 'keyboard: effective MET spans LOW (<3) and HIGH (>=6) during the session');
+      check(kb.lastPunch && !kb.lastPunch.measured && near(kb.lastPunch.v, 7.5, 1e-9) && near(kb.lastPunch.kcal, punchKcal(7.5), 1e-9), 'keyboard: punch speed falls back to 3.5 + 2 * power m/s (' + kb.lastPunch.v + ' m/s = ' + kb.lastPunch.kcal.toFixed(3) + ' kcal)');
+      check(Fitness.live.on && near(Fitness.live.kcal, live.kcal, 1e-9) && /^(LOW|MODERATE|HIGH)$/.test(Fitness.live.label), 'Fitness.live mirrors the running session (' + Fitness.live.kcal.toFixed(1) + ' kcal, ' + Fitness.live.label + ')');
+      kb.endSession('quit');
+      check(!Fitness.live.on, 'Fitness.live switches off when the session ends');
+      reseed();
+    }
+
+    // =====================================================================================
+    // B. webcam path: synthetic pose kinematics, 3 minutes at 75 kg, 30 fps camera / 60 fps ticks
+    //    12 s cycle: 0-2.5 guard | 2.5-5.5 sidestep at 0.6 m/s (out and back) | 5.5-7 one squat 0.30 m
+    //                7-10 flurry of 7 punches (0.5 m out in 100 ms, back in 200 ms, one every 400 ms) | 10-12 guard
+    //    Camera 4:3, 62 deg FOV (F = 0.83), player 1.6 m away, 0.38 m shoulders, +-4 mm landmark jitter.
+    // =====================================================================================
+    fit.startSession({ stage: 'BACKSTREET', rank: 4, mode: 'cam' });
+    check(!!fit.session && fit.session.startedAt > 0, 'startSession creates a live session');
+    {
+      const DT = 1000 / 60, CAM = 1000 / 30, TOTAL = 180000, F = 0.83, ASPECT = 4 / 3, S = 0.38, D0 = 1.6, PUNCHES_PER = 7, CYCLE = 12000;
+      let rng = 12345; const rnd = () => { rng = (rng * 1103515245 + 12345) & 0x7fffffff; return rng / 0x7fffffff - 0.5; };
+      const jit = (p, a) => ({ x: p.x + rnd() * a, y: p.y + rnd() * a, z: p.z + rnd() * a });
+      // body state at a phase (seconds into the cycle): torso x (m), torso drop (m), wrist z per hand (m, negative = forward), punch index
+      const body = ph => {
+        let x = 0, drop = 0, lz = -0.15, rz = -0.15, punchIdx = -1, punchOut = false;
+        if (ph >= 2.5 && ph < 4) x = 0.6 * (ph - 2.5); else if (ph >= 4 && ph < 5.5) x = 0.9 - 0.6 * (ph - 4);
+        if (ph >= 5.5 && ph < 5.9) drop = 0.3 * (ph - 5.5) / 0.4; else if (ph >= 5.9 && ph < 6.4) drop = 0.3; else if (ph >= 6.4 && ph < 6.8) drop = 0.3 * (1 - (ph - 6.4) / 0.4);
+        if (ph >= 7 && ph < 7 + PUNCHES_PER * 0.4) {
+          punchIdx = Math.floor((ph - 7) / 0.4); const p = ph - 7 - punchIdx * 0.4;
+          const z = p < 0.1 ? -0.15 - 0.5 * (p / 0.1) : p < 0.3 ? -0.65 + 0.5 * ((p - 0.1) / 0.2) : -0.15;
+          if (punchIdx % 2 === 0) lz = z; else rz = z; punchOut = p >= 0.1 - 1e-9;
+        }
+        return { x, drop, lz, rz, punchIdx, punchOut, hold: drop >= 0.15 };
+      };
+      const frameAt = ph => {
+        const b = body(ph);
+        const img = Array.from({ length: 33 }, () => ({ x: 0.5, y: 0.5, z: 0 })), world = Array.from({ length: 33 }, () => ({ x: 0, y: 0, z: 0 }));
+        const d = D0, sw = F * S / d, cx = 0.5 + b.x * F / d, cy = 0.5 + (-0.10 + b.drop) * ASPECT * F / d;
+        img[11] = jit({ x: cx + sw / 2, y: cy, z: 0 }, 0.002); img[12] = jit({ x: cx - sw / 2, y: cy, z: 0 }, 0.002);
+        img[23] = jit({ x: cx + sw * 0.35, y: cy + 0.5 * ASPECT * F / d, z: 0 }, 0.002); img[24] = jit({ x: cx - sw * 0.35, y: cy + 0.5 * ASPECT * F / d, z: 0 }, 0.002);
+        img[15] = jit({ x: cx + sw * 0.4, y: cy + 0.1, z: b.lz }, 0.002); img[16] = jit({ x: cx - sw * 0.4, y: cy + 0.1, z: b.rz }, 0.002);
+        img[0] = jit({ x: cx, y: cy - 0.12, z: 0 }, 0.002);
+        world[11] = jit({ x: 0.19, y: -0.45, z: 0 }, 0.004); world[12] = jit({ x: -0.19, y: -0.45, z: 0 }, 0.004);
+        world[23] = jit({ x: 0.13, y: 0, z: 0 }, 0.004); world[24] = jit({ x: -0.13, y: 0, z: 0 }, 0.004);
+        world[15] = jit({ x: 0.15, y: -0.35 - b.drop, z: b.lz }, 0.004); world[16] = jit({ x: -0.15, y: -0.35 - b.drop, z: b.rz }, 0.004);
+        return { b, pose: { world, img, aspect: ASPECT, t: 0 } };
+      };
+      let t = 0, camFrame = -1, cur = null, punches = 0, lastPunchKey = '', dodges = 0, hits = 0, supers = 0;
+      let expMetMs = 0, expBurst = 0, samples = { walk: [], flurry: [], guard: [] }, punchV = [], sawHigh = false, sawLow = false, pushes = 0, camFrames = 0, lastKin = null, maxSquatTerm = 0;
+      let nextDodge = 15000, nextHit = 40000;
+      while (t < TOTAL) {
+        const tNow = t + DT, cyc = Math.floor(tNow / CYCLE), ph = (tNow % CYCLE) / 1000;
+        const fr = Math.floor(tNow / CAM);
+        if (fr !== camFrame) { camFrame = fr; cur = frameAt(ph); cur.pose.t = tNow; if (tNow < TOTAL - 1500) camFrames++; } else cur.pose.t = tNow; // new camera frame every 33 ms, same landmarks in between
+        const lost = tNow >= TOTAL - 1500;
+        const s = lost ? { moving: 0, duck: false, block: false, handsUp: false, tracking: false, pose: null }
+                       : { moving: 0.42, duck: cur.b.hold, block: false, handsUp: false, tracking: true, pose: cur.pose }; // joystick is ignored with a pose
+        fit.tick(DT, s);
+        { const sm = fit._kin.samples; if (sm.length && sm[sm.length - 1].t === tNow) pushes++; }
+        if (fit.kin) lastKin = fit.kin;
+        // independent MET from the module's measured kinematics with the documented formulas (squat timing taken from the module)
+        const k = fit.kin, tm = fit.terms;
+        const base = s.tracking ? 2.0 : 1.3;
+        const move = k ? 2.5 * Math.min(1, k.vHip / 1.3) : 2.5 * Math.pow(s.moving, 1.2);
+        const arm = k ? 5.5 * Math.tanh(k.vArm / 2.2) / Math.tanh(3 / 2.2) : 0;
+        const crouch = (k ? k.crouch : s.duck) ? 1 : 0;
+        expMetMs += (base + move + arm + crouch + tm.squat) * DT;
+        maxSquatTerm = Math.max(maxSquatTerm, tm.squat);
+        if (k) { if (ph > 3.3 && ph < 3.9) samples.walk.push(k.vHip); if (ph > 9.5 && ph < 9.8) samples.flurry.push(k.vArm); if (ph > 1.5 && ph < 2.4) samples.guard.push(k.vArm, k.vHip); }
+        t = tNow;
+        // a punch event the moment the fist is fully out (once per punch)
+        if (!lost && cur.b.punchOut) { const key = cyc + ':' + cur.b.punchIdx; if (key !== lastPunchKey) { lastPunchKey = key; const hand = cur.b.punchIdx % 2 === 0 ? 'L' : 'R'; fit.event('punch', { hand, power: 1, result: ['hit', 'crit', 'guarded', 'whiff', 'counter'][punches % 5] }); punches++; punchV.push(fit.lastPunch.v); expBurst += fit.lastPunch.kcal; } }
+        if (t >= nextDodge && dodges < 6) { fit.event('dodge', { how: dodges % 2 ? 'duck' : 'footwork' }); dodges++; nextDodge += 28000; }
+        if (t >= nextHit && hits < 4) { fit.event('hitTaken', { dmg: 8 }); hits++; nextHit += 40000; }
+        if (t >= 100000 && !supers) { fit.event('super'); supers++; }
+        if (fit.met >= 6) sawHigh = true;
+        if (fit.met < 3) sawLow = true;
+      }
+      const mean = a => a.reduce((x, y) => x + y, 0) / Math.max(1, a.length);
+      const live = fit.session, expMet = expMetMs * kcalPerMetMs, expected = expMet + expBurst;
+      const vMean = mean(punchV), vMin = Math.min(...punchV), vMax = Math.max(...punchV);
+      log('     webcam model: MET integral ' + expMet.toFixed(2) + ' kcal + ' + punches + ' punches ' + expBurst.toFixed(2) + ' kcal = ' + expected.toFixed(2) + ' kcal expected; module says ' + live.kcal.toFixed(2) +
+          ' (avg ' + (live.kcal / kcalPerMetMs / live.totalMs).toFixed(2) + ' MET, ' + (live.kcal / 3).toFixed(1) + ' kcal/min)');
+      log('     measured: sidestep vHip ' + mean(samples.walk).toFixed(2) + ' m/s (nominal 0.60), flurry vArm ' + mean(samples.flurry).toFixed(2) + ' m/s, guard ' + mean(samples.guard).toFixed(3) + ' m/s, punch peak ' + vMean.toFixed(2) + ' m/s (' + vMin.toFixed(2) + '-' + vMax.toFixed(2) + ', nominal 5.0), squats ' + live.squats + ', torso distance ' + lastKin.dist.toFixed(2) + ' m');
+      check(near(pushes, camFrames, camFrames * 0.01), 'a camera frame repeated across 60 fps ticks is sampled once: ' + pushes + ' samples for ' + camFrames + ' camera frames');
+      check(near(live.kcal, expected, 0.05 + expected * 0.01), 'webcam: kcal = documented formulas applied to the measured kinematics within 1% (' + live.kcal.toFixed(2) + ' vs ' + expected.toFixed(2) + ')');
+      // analytic estimate for this cycle: base 2.0 + sidestep ~1.0 MET x 3 s + arm ~2.6 MET x 3 s + crouch 1 MET x 0.9 s + squat 1.5 MET x 6 s
+      // = ~5.0 MET average -> 6.6 kcal/min -> ~15 kcal + 105 punches x 0.048 kcal = ~20 kcal; the punching-bag Compendium code is 5.5 MET
+      check(live.kcal >= 15 && live.kcal <= 30, 'webcam: 3 min moderate session at 75 kg lands in the 15-30 kcal band of the documented model (' + live.kcal.toFixed(1) + ')');
+      const avgMet = live.kcal / kcalPerMetMs / live.totalMs;
+      check(avgMet >= 4 && avgMet <= 6.5, 'session-average MET is in the moderate band next to the 5.5 MET punching-bag reference (' + avgMet.toFixed(2) + ')');
+      check(mean(samples.walk) >= 0.42 && mean(samples.walk) <= 0.7, 'sidestep at 0.6 m/s measured as 0.42-0.70 m/s hip speed after the noise floor (' + mean(samples.walk).toFixed(2) + ')');
+      check(mean(samples.flurry) >= 0.8 && mean(samples.flurry) <= 1.5, 'flurry mean wrist speed over 2 s is 0.8-1.5 m/s (' + mean(samples.flurry).toFixed(2) + ')');
+      check(mean(samples.guard) < 0.05, 'landmark jitter in guard stays under the noise floors (' + mean(samples.guard).toFixed(3) + ' m/s)');
+      check(punches === 15 * PUNCHES_PER && live.punches === punches, 'punches counted (' + live.punches + ')');
+      check(punchV.every(v => v >= 3.5 && v <= 6.5) && punchV.every((v, i) => i === 0 || fit.lastPunch.measured), 'every punch speed is measured from the wrist track, 3.5-6.5 m/s for a 5 m/s punch (' + vMin.toFixed(2) + '-' + vMax.toFixed(2) + ')');
+      check(near(live.punchKcal, punches * punchKcal(5), punches * punchKcal(5) * 0.35), 'punch bursts total ~0.048 kcal each at 5 m/s (' + live.punchKcal.toFixed(2) + ' kcal for ' + punches + ')');
+      check(live.squats === 15 && live.ducks === 15, '15 squat cycles detected from the torso height and 15 ducks from the flag (' + live.squats + ' / ' + live.ducks + ')');
+      check(maxSquatTerm > 1.2 && maxSquatTerm <= 4.5, 'squat term is +1.5 MET scaled by depth, at most three stacked (' + maxSquatTerm.toFixed(2) + ')');
+      check(near(lastKin.dist, D0, 0.1) && near(lastKin.shoulderM, S, 0.02), 'pinhole model recovers the 1.6 m camera distance and the 0.38 m shoulders (' + lastKin.dist.toFixed(2) + ' m, ' + lastKin.shoulderM.toFixed(3) + ' m)');
+      const distM = fit.metres(live.distance);
+      check(distM >= 14 && distM <= 32, 'walked distance integrates the measured hip speed (' + distM.toFixed(1) + ' m for 15 x 1.8 m nominal)');
+      check(near(live.totalMs, TOTAL, DT), 'totalMs is ~180000 (' + live.totalMs + ')');
+      check(live.activeMs > 60000 && live.activeMs < live.totalMs, 'activeMs (>= 3 MET) is a real fraction of the session (' + Math.round(live.activeMs / 1000) + ' s)');
+      check(live.dodges === 6 && live.hitsTaken === 4 && live.supers === 1, 'dodges, hits taken and supers counted');
+      check(sawHigh && sawLow, 'MET spans LOW (<3) and HIGH (>=6) during the session');
+      check(fit.terms.base === 1.3 && fit.kin === null && near(live.lostMs, 1500, 2 * DT), 'tracking lost: base 1.3 MET, kinematics dropped, lostMs accounted (' + Math.round(live.lostMs) + ' ms)');
+      check(live.peakIntensity > 0.4 && live.peakIntensity <= 1, 'peakIntensity recorded (' + live.peakIntensity.toFixed(2) + ')');
+      check(fit.summaryHTML().indexOf('estimate is low') < 0, 'no accuracy note when tracking was lost < 20% of the time');
+      // live queries while running
+      const todayLive = fit.today();
+      check(todayLive.date === dateKey(Date.now()) && todayLive.sessions === 1 && near(todayLive.kcal, live.kcal, .02), 'today() includes the live session');
+      const sumLive = fit.summaryHTML();
+      check(sumLive.indexOf('kcal') >= 0 && sumLive.indexOf(live.kcal.toFixed(1)) >= 0, 'summaryHTML works mid-session and contains kcal');
+      hud.refresh();
+      check(hud.querySelector('.fit-val').textContent === live.kcal.toFixed(1), 'HUD widget shows kcal with one decimal (' + hud.querySelector('.fit-val').textContent + ')');
+      check(/^(LOW|MODERATE|HIGH)$/.test(hud.querySelector('.fit-int').textContent), 'HUD widget intensity label is LOW/MODERATE/HIGH (' + hud.querySelector('.fit-int').textContent + ')');
+      const L = Fitness.live;
+      check(L.on && near(L.kcal, live.kcal, 1e-9) && near(L.met, fit.met, 1e-9) && L.label === (fit.met >= 6 ? 'HIGH' : fit.met >= 3 ? 'MODERATE' : 'LOW') && near(L.ms, live.totalMs, 1e-6), 'Fitness.live carries kcal / met / label / ms for the canvas HUD');
+    }
+    const PUNCHES = fit.session.punches;
+
+    // ---- end + persistence ----
+    const rec = fit.endSession('win');
+    check(fit.session === null && rec && rec.result === 'win' && rec.stage === 'BACKSTREET' && rec.rank === 4, 'endSession returns the record and clears the live session');
+    check(rec.avgIntensity > 0.2 && rec.kinematic === true && rec.squats === 15 && typeof rec.lostMs === 'number', 'record stores avg intensity, kinematic flag, squats and lostMs (' + rec.avgIntensity.toFixed(2) + ')');
+    let stored = null; try { stored = JSON.parse(localStorage.getItem('dogefight.fitness')); } catch (e) {}
+    if (stored) {
+      check(Array.isArray(stored) && stored.length === 6 && stored[5].kcal === rec.kcal, 'session persisted to localStorage dogefight.fitness (' + stored.length + ' records)');
+      let st = null; try { st = JSON.parse(localStorage.getItem('dogefight.fitness.settings')); } catch (e) {}
+      check(st && st.weightKg === 75, 'settings persisted to dogefight.fitness.settings');
+      const again = new Fitness();
+      check(again.sessions.length === 6 && again.weightKg === 75, 'a new instance reloads sessions and settings');
+    }
+    const t2 = fit.today();
+    check(t2.sessions === 1 && near(t2.kcal, rec.kcal, .02) && near(t2.minutes, 3, .05) && t2.punches === PUNCHES, 'today() aggregates after ending (' + t2.kcal + ' kcal, ' + t2.minutes + ' min)');
+    const h = fit.history(7);
+    check(h.length === 7 && h[6].date === dateKey(Date.now()) && h[6].sessions === 1 && h[6].punches === PUNCHES, 'history(7) has 7 days ending today');
+    check(h[5].sessions === 1 && near(h[5].kcal, 40.5, .01) && h[3].sessions === 2 && near(h[3].kcal, 44.9, .01), 'history buckets seeded past sessions by day');
+    check(fit.history(3).length === 3 && fit.history(30).length === 30, 'history(days) honours the day count');
+    const sum = fit.summaryHTML();
+    document.getElementById('sum').innerHTML = sum;
+    check(sum.indexOf('kcal') >= 0 && sum.indexOf('<b') >= 0 && sum.indexOf(String(PUNCHES)) >= 0, 'summaryHTML contains kcal, bold numbers and the punch count');
+
+    // ---- accuracy note when tracking is lost > 20% ----
+    {
+      const lost = new Fitness({ weightKg: W });
+      lost.startSession({ stage: 'S', rank: 1, mode: 'cam' });
+      for (let k = 0; k < 40; k++) lost.tick(250, { tracking: k % 3 !== 0 });   // 14 of 40 frames lost = 35%
+      check(lost.summaryHTML().indexOf('tracking lost 35%') >= 0 && Fitness.live.note.indexOf('estimate is low') >= 0, 'accuracy note in the summary and Fitness.live when tracking was lost > 20% of the session (' + Fitness.live.note + ')');
+      lost.endSession('quit'); reseed();
+    }
+
+    // ---- cap at 200 ----
+    const big = new Fitness();
+    for (let i = 0; i < 205; i++) { big.startSession({ stage: 'X', rank: 1, mode: 'kb' }); for (let k = 0; k < 5; k++) big.tick(250, { moving: 0, tracking: true }); big.endSession('quit'); }
+    check(big.sessions.length === 200, 'session store capped at 200 (' + big.sessions.length + ')');
+    try { localStorage.setItem('dogefight.fitness', JSON.stringify(stored || [])); } catch (e) {}
+    // ---- sub-second sessions are not logged; a mis-click stays out of the table ----
+    const quick = new Fitness(); const before = quick.sessions.length;
+    quick.startSession({}); quick.tick(200, {}); quick.endSession('quit');
+    check(quick.sessions.length === before, 'sessions under 1 s are not logged');
+    quick.startSession({}); quick.tick(5000, {}); const clampedMs = quick.session.totalMs; quick.endSession('quit');
+    check(clampedMs === 250, 'tick clamps dt to 250 ms per frame so a tab-switch spike cannot inflate kcal (' + clampedMs + ')');
+    // ---- a pose with no usable landmarks falls back to the joystick model ----
+    {
+      const p = new Fitness({ weightKg: W }); p.startSession({});
+      p.tick(100, { moving: 1, tracking: true, pose: { world: null, img: [], aspect: 4 / 3, t: 100 } });
+      check(p.kin === null && p.terms && !p.terms.kinematic && near(p.terms.move, 2.5, 1e-9), 'an empty pose falls back to the joystick movement term');
+      p.endSession('quit');
+    }
+
+    // ---- broken localStorage ----
+    const realLS = Object.getOwnPropertyDescriptor(window, 'localStorage');
+    let brokenOk = false;
+    try {
+      Object.defineProperty(window, 'localStorage', { configurable: true, get() { throw new Error('denied'); } });
+      const f2 = new Fitness({ weightKg: 70 });
+      f2.startSession({ stage: 'S', rank: 1, mode: 'kb' }); for (let k = 0; k < 8; k++) f2.tick(250, { moving: .5, tracking: true }); f2.event('punch', { hand: 'L', power: 1, result: 'hit' });
+      const r2 = f2.endSession('lose');
+      brokenOk = r2 && r2.kcal > 0 && f2.sessions.length === 1 && f2.today().sessions === 1;
+    } catch (e) { log('     broken localStorage threw: ' + e.message); }
+    finally { if (realLS) Object.defineProperty(window, 'localStorage', realLS); else delete window.localStorage; }
+    check(brokenOk, 'works with a throwing localStorage (no persistence, no exception)');
+    // ---- garbage in storage ----
+    let garbageOk = false;
+    try { localStorage.setItem('dogefight.fitness', '{not json'); const f3 = new Fitness(); garbageOk = Array.isArray(f3.sessions) && f3.sessions.length === 0; localStorage.setItem('dogefight.fitness', JSON.stringify(stored || [])); } catch (e) { garbageOk = true; }
+    check(garbageOk, 'invalid JSON in storage is ignored');
+
+    // ---- render the log ----
+    const logView = new Fitness();
+    const panel = logView.renderLog(document.getElementById('logwrap'));
+    check(panel && panel.classList.contains('fit-log') && panel.parentNode === document.getElementById('logwrap'), 'renderLog creates a .fit-log panel inside the container');
+    check(!!panel.querySelector('canvas') && panel.querySelectorAll('tbody tr').length === 6, 'log has a chart canvas and a row per session (' + panel.querySelectorAll('tbody tr').length + ')');
+    check(panel.textContent.indexOf('TRAINING LOG') >= 0 && panel.textContent.indexOf(rec.kcal.toFixed(1)) >= 0, 'log shows the TRAINING LOG title and today\'s kcal');
+    // HUD widget keeps ticking harmlessly with no live session
+    hud.refresh();
+    check(hud.querySelector('.fit-int').textContent === 'LOW' && hud.querySelector('.fit-val').textContent === rec.kcal.toFixed(1), 'HUD widget idles at LOW showing the last session after it ends');
+  } catch (e) {
+    fails.push('exception: ' + (e && e.stack || e));
+    log('EXCEPTION ' + (e && e.stack || e));
+  }
+  document.title = fails.length ? 'FAIL ' + fails.length : 'PASS';
+  log('\n' + document.title);
+  if (fails.length) logEl.innerHTML = logEl.innerHTML.replace(/^FAIL .*$/gm, '<span class="f">$&</span>');
+})();
+</script>
+</body></html>

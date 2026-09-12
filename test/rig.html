@@ -1,0 +1,248 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>RUNNING</title>
+<style>
+  body { margin: 0; background: #14151a; color: #e8e4dc; font: 13px "Segoe UI", system-ui, sans-serif; }
+  #wrap { display: flex; gap: 12px; padding: 10px; flex-wrap: wrap; }
+  canvas { background: #2b2d35; border: 1px solid #444; display: block; }
+  .col { display: flex; flex-direction: column; gap: 8px; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  button { background: #2a2c36; color: #e8e4dc; border: 1px solid #555; padding: 5px 9px; cursor: pointer; border-radius: 4px; font: inherit; }
+  button.on { background: #c8281e; border-color: #e0574a; }
+  textarea { width: 420px; height: 420px; background: #0f1012; color: #cfd; border: 1px solid #444; font: 11px Consolas, monospace; }
+  input[type=range] { width: 300px; }
+  #status { font-weight: 700; }
+  label { opacity: .8; }
+</style></head><body>
+<div id="wrap">
+  <div class="col">
+    <canvas id="c" width="960" height="540"></canvas>
+    <div class="row"><b>state</b> <span id="states"></span></div>
+    <div class="row"><b>attack</b> <span id="attacks"></span></div>
+    <div class="row">
+      <label>time <input id="time" type="range" min="0" max="6000" step="1" value="0"> <span id="tv">0</span>ms</label>
+      <button id="play" class="on">playing</button>
+      <label>prog <input id="prog" type="range" min="0" max="1" step="0.001" value="0"></label>
+      <label>auto-prog <input id="autoprog" type="checkbox" checked></label>
+      <label>walking <input id="walk" type="range" min="0" max="1" step="0.01" value="0"></label>
+      <button id="hitL">hit by L</button><button id="hitR">hit by R</button>
+      <label>skeleton <input id="bones" type="checkbox"></label>
+      <label title="cut the rest-pose silhouette into the part rects as if it were boxer.png">synthetic image <input id="synth" type="checkbox"></label>
+      <label>zoom <input id="zoom" type="range" min="0.5" max="2" step="0.01" value="1.08"></label>
+      <label title="spread the parts apart to check that no part drags a chunk of its neighbour along">explode <input id="explode" type="range" min="0" max="1" step="0.01" value="0"></label>
+      <label>lighting <input id="light" type="checkbox" checked></label>
+    </div>
+    <div class="row"><span id="status">self-check: running</span> <span id="img"></span></div>
+    <pre id="log" style="max-height:120px;overflow:auto;margin:0"></pre>
+  </div>
+  <div class="col">
+    <b>part table (JSON, live)</b>
+    <textarea id="table" spellcheck="false"></textarea>
+    <div class="row"><button id="apply">apply</button><button id="reset">reset</button><span id="tblerr" style="color:#ff7a6a"></span></div>
+  </div>
+</div>
+<script src="../js/assets.js"></script>
+<script src="../js/opponent.js"></script>
+<script>
+(function () {
+  const STATES = ['intro', 'idle', 'windup', 'strike', 'recover', 'stun', 'hurt', 'ko', 'taunt'];
+  const ATTACKS = [null, 'jab', 'hookL', 'hookR', 'overhead', 'uppercut', 'body'];
+  const $ = id => document.getElementById(id);
+  const ctx = $('c').getContext('2d');
+  const log = m => { $('log').textContent += m + '\n'; };
+  let rig = new Opponent();
+  const ui = { state: 'idle', attack: null, t: 0, playing: true, prog: 0, autoprog: true, hurtT: -1e9, hurtHand: 'L', stateT: 0 };
+  // URL params for headless screenshots: ?state=windup&attack=hookR&prog=0.8&t=1200&walking=1&hit=L&pause=1&bones=1
+  const q = new URLSearchParams(location.search);
+  if (q.get('state')) ui.state = q.get('state');
+  if (q.get('attack')) ui.attack = q.get('attack') === 'null' ? null : q.get('attack');
+  if (q.get('t')) ui.t = +q.get('t');
+  if (q.get('prog')) { ui.prog = +q.get('prog'); ui.autoprog = false; }
+  if (q.get('hit')) { ui.hurtT = ui.t - (+q.get('hitAge') || 0); ui.hurtHand = q.get('hit'); } // hitAge: ms since the hit (with pause=1)
+  if (q.get('pause')) ui.playing = false;
+  if (q.get('walking')) $('walk').value = q.get('walking');
+  if (q.get('bones')) $('bones').checked = true;
+  if (q.get('zoom')) $('zoom').value = q.get('zoom');
+  if (q.get('explode')) $('explode').value = q.get('explode');
+  if (q.get('light') === '0') $('light').checked = false;
+  $('prog').value = ui.prog; $('autoprog').checked = ui.autoprog; $('time').value = ui.t;
+  // synthetic image: the rest-pose silhouette rendered into a 1024x1536 "boxer.png" so the cutout
+  // pipeline (rects, pivots, draw order, overlays) can be eyeballed before the real asset exists
+  // assets.js resolves 'assets/boxer.png' against the page, i.e. test/assets/ from here: load the real
+  // file from ../assets ourselves and serve it through ASSETS.get / ASSETS.status
+  let realImg = null;
+  { const im = new Image(); im.onload = () => { realImg = im; ASSETS.status = n => n === 'boxer' ? 'ok' : 'missing'; $('img').textContent = 'boxer.png: ok (' + im.naturalWidth + 'x' + im.naturalHeight + ')'; checkCache(im); }; im.src = '../assets/boxer.png'; }
+  const origGet = ASSETS.get.bind(ASSETS);
+  const realGet = n => (n === 'boxer' && realImg) ? realImg : origGet(n); let synth = null;
+  ASSETS.get = realGet;
+  function useSynthetic(on) {
+    if (on && !synth) { synth = document.createElement('canvas'); synth.width = 1024; synth.height = 1536; const c = synth.getContext('2d'); const I = rig.table.image; c.setTransform(1 / I.k, 0, 0, 1 / I.k, I.cx, I.feetY); rig.drawRest(c); }
+    ASSETS.get = on ? (n => n === 'boxer' ? synth : realGet(n)) : realGet;
+    $('synth').checked = on;
+  }
+  $('synth').onchange = e => useSynthetic(e.target.checked);
+  if (q.get('img') === 'synthetic') useSynthetic(true);
+  const DUR = { intro: 1500, idle: 1200, windup: 800, strike: 170, recover: 350, stun: 1000, hurt: 320, ko: 600, taunt: 1000 };
+
+  // --- buttons
+  for (const s of STATES) { const b = document.createElement('button'); b.textContent = s; b.onclick = () => { ui.state = s; ui.stateT = ui.t; mark(); }; b.dataset.k = s; $('states').appendChild(b); }
+  for (const a of ATTACKS) { const b = document.createElement('button'); b.textContent = a || 'none'; b.onclick = () => { ui.attack = a; mark(); }; b.dataset.k = String(a); $('attacks').appendChild(b); }
+  function mark() { for (const b of $('states').children) b.classList.toggle('on', b.dataset.k === ui.state); for (const b of $('attacks').children) b.classList.toggle('on', b.dataset.k === String(ui.attack)); }
+  mark();
+  $('play').onclick = () => { ui.playing = !ui.playing; $('play').classList.toggle('on', ui.playing); $('play').textContent = ui.playing ? 'playing' : 'paused'; };
+  $('time').oninput = e => { ui.t = +e.target.value; ui.playing = false; $('play').classList.remove('on'); $('play').textContent = 'paused'; };
+  $('prog').oninput = e => { ui.prog = +e.target.value; ui.autoprog = false; $('autoprog').checked = false; };
+  $('autoprog').onchange = e => { ui.autoprog = e.target.checked; };
+  $('hitL').onclick = () => { ui.hurtT = ui.t; ui.hurtHand = 'L'; };
+  $('hitR').onclick = () => { ui.hurtT = ui.t; ui.hurtHand = 'R'; };
+
+  // --- part table editor
+  const tbl = $('table');
+  tbl.value = JSON.stringify(Opponent.DEFAULT_TABLE, null, 1);
+  function applyTable() {
+    try { const t = JSON.parse(tbl.value); rig.setTable(t); $('tblerr').textContent = ''; }
+    catch (e) { $('tblerr').textContent = String(e.message || e); }
+  }
+  tbl.oninput = applyTable; $('apply').onclick = applyTable;
+  $('reset').onclick = () => { tbl.value = JSON.stringify(Opponent.DEFAULT_TABLE, null, 1); applyTable(); };
+
+  // --- view
+  function view(t, dt) {
+    const st = ui.state;
+    let prog = ui.prog;
+    if (ui.autoprog) { const d = DUR[st] || 1000; prog = st === 'ko' || st === 'taunt' ? Math.min(1, (t - ui.stateT) / d) : ((t - ui.stateT) % d) / d; }
+    return {
+      t, dt, state: st, attack: ui.attack, prog, hurtAge: t - ui.hurtT, hurtHand: ui.hurtHand, walking: +$('walk').value,
+      target: { x: 10, y: -150, r: 130 }, inRange: true,
+    };
+  }
+  function drawBones(J) {
+    ctx.save(); ctx.strokeStyle = 'rgba(80,220,255,0.9)'; ctx.lineWidth = 1.5; ctx.fillStyle = '#5df';
+    const B = [['pelvis', 'waist'], ['waist', 'neck'], ['neck', 'headTop'], ['ponyRoot', 'ponyTip'], ['shR', 'elR'], ['elR', 'wrR'], ['wrR', 'glR'], ['shL', 'elL'], ['elL', 'wrL'], ['wrL', 'glL'], ['hipR', 'kneeR'], ['kneeR', 'ankR'], ['ankR', 'toeR'], ['hipL', 'kneeL'], ['kneeL', 'ankL'], ['ankL', 'toeL'], ['shR', 'shL'], ['hipR', 'hipL']];
+    ctx.beginPath(); for (const [a, b] of B) if (J[a] && J[b]) { ctx.moveTo(J[a][0], J[a][1]); ctx.lineTo(J[b][0], J[b][1]); } ctx.stroke();
+    for (const k in J) { ctx.beginPath(); ctx.arc(J[k][0], J[k][1], 2.5, 0, Math.PI * 2); ctx.fill(); }
+    ctx.restore();
+  }
+  let last = performance.now(), out = null;
+  // ?pre=<ms>: advance the rig's internal state (footwork distance, springs, smoothing) by that much
+  // simulated time before the first visible frame, so headless screenshots can show later phases
+  if (q.get('pre')) { const pre = +q.get('pre'), oc = document.createElement('canvas').getContext('2d'); for (let s = 0; s < pre; s += 16) { rig.draw(oc, view(ui.t, 16)); if (ui.playing) ui.t += 16; } }
+  function frame(now) {
+    const dt = Math.min(100, now - last); last = now;
+    if (ui.playing) { ui.t += dt; $('time').value = ui.t % 6000; }
+    $('tv').textContent = Math.round(ui.t);
+    const t = ui.t;
+    ctx.clearRect(0, 0, 960, 540);
+    // floor + reference lines
+    ctx.fillStyle = '#23252c'; ctx.fillRect(0, 470, 960, 70);
+    const z = +$('zoom').value;
+    ctx.save(); ctx.translate(480 + (+q.get('ox') || 0), 470 + (+q.get('oy') || 0)); ctx.scale(z, z);
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.beginPath(); ctx.moveTo(-200, 0); ctx.lineTo(200, 0); ctx.moveTo(0, 0); ctx.lineTo(0, -400); ctx.moveTo(-130, -400); ctx.lineTo(130, -400); ctx.stroke();
+    ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.beginPath(); ctx.ellipse(0, 4, 110, 18, 0, 0, Math.PI * 2); ctx.fill();
+    const v = view(t, ui.playing ? dt : 16);
+    rig.explode = +$('explode').value; rig.lighting = $('light').checked;
+    try {
+      out = rig.draw(ctx, v);
+      if (out.cue) { ctx.strokeStyle = '#d4a13a'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(out.cue.x, out.cue.y, out.cue.r + 8 + (1 - v.prog) * 40, 0, Math.PI * 2); ctx.stroke(); }
+      if ($('bones').checked && out.joints) drawBones(out.joints);
+      ctx.strokeStyle = 'rgba(255,120,120,0.5)'; ctx.beginPath(); ctx.moveTo(-40, out.headY); ctx.lineTo(40, out.headY); ctx.stroke();
+    } catch (e) { ctx.restore(); ctx.fillStyle = '#f66'; ctx.fillText('draw threw: ' + e, 20, 30); requestAnimationFrame(frame); return; }
+    ctx.restore();
+    // ?dump=<part>: show that part's cached canvases (cut-out, hot copy, blurred shadow) top-right
+    if (q.get('dump') && rig.cache && rig.cache.parts[q.get('dump')]) {
+      const e = rig.cache.parts[q.get('dump')], hh = 200, ww = Math.round(hh * e.sw / e.sh);
+      ctx.fillStyle = '#6a7a6a'; ctx.fillRect(955 - 3 * (ww + 8), 24, 3 * (ww + 8), hh + 8);
+      ctx.drawImage(e.cv, 955 - 3 * (ww + 8) + 4, 28, ww, hh);
+      if (e.hot) ctx.drawImage(e.hot, 955 - 2 * (ww + 8) + 4, 28, ww, hh);
+      if (e.shadow) ctx.drawImage(e.shadow, 955 - (ww + 8) + 4, 28, ww, hh);
+    }
+    ctx.fillStyle = '#e8e4dc'; ctx.font = '12px Consolas, monospace';
+    ctx.fillText(`state=${v.state} attack=${v.attack} prog=${v.prog.toFixed(2)} headY=${out ? out.headY.toFixed(1) : '-'} cue=${out && out.cue ? `${out.cue.x.toFixed(0)},${out.cue.y.toFixed(0)},${out.cue.r.toFixed(0)}` : 'null'} image=${$('synth').checked ? 'synthetic' : ASSETS.status('boxer')}`, 10, 16);
+    requestAnimationFrame(frame);
+  }
+
+  // --- self-check: every state x attack x a few prog values, with and without an image
+  function selfCheck() {
+    let fails = 0;
+    const off = document.createElement('canvas'); off.width = 400; off.height = 400; const c = off.getContext('2d');
+    const probe = new Opponent();
+    let t = 0;
+    for (const st of STATES) for (const atk of ATTACKS) for (const prog of [0, 0.25, 0.5, 0.75, 1]) for (const hh of ['L', 'R']) {
+      t += 37;
+      const v = { t, dt: 16, state: st, attack: atk, prog, hurtAge: prog < 0.5 ? 100 : 1e9, hurtHand: hh, walking: prog, target: { x: 5, y: -160, r: 140 }, inRange: true };
+      try {
+        c.save(); c.translate(200, 380); c.scale(0.9, 0.9);
+        const o = probe.draw(c, v);
+        c.restore();
+        if (!o || typeof o.headY !== 'number' || !isFinite(o.headY)) throw new Error('bad headY ' + (o && o.headY));
+        if (o.headY > -250 && st !== 'ko') throw new Error('headY too low: ' + o.headY);
+        if (st === 'windup' && atk && !(o.cue && isFinite(o.cue.x) && isFinite(o.cue.y) && o.cue.r > 0)) throw new Error('windup without cue');
+        if (st !== 'windup' && o.cue) throw new Error('cue outside windup');
+        if ('cue' in o === false) throw new Error('no cue key');
+      } catch (e) { fails++; log(`FAIL ${st}/${atk}/${prog}/${hh}: ${e.message || e}`); }
+    }
+    // draw once with a stand-in image so the image branch (incl. scratch overlays) is exercised
+    try {
+      const im = document.createElement('canvas'); im.width = 1024; im.height = 1536; const ic = im.getContext('2d'); ic.fillStyle = '#d9a77a'; ic.fillRect(150, 40, 750, 1430);
+      const saved = ASSETS.get; ASSETS.get = () => im;
+      try {
+        for (const st of ['idle', 'strike', 'windup']) { c.save(); probe.draw(c, { t: 9000, dt: 16, state: st, attack: 'jab', prog: 0.6, hurtAge: 1e9, hurtHand: 'L', walking: 1, target: { x: 0, y: -150, r: 120 }, inRange: true }); c.restore(); }
+      } finally { ASSETS.get = saved; }
+    } catch (e) { fails++; log('FAIL image branch: ' + (e.message || e)); }
+    // table round-trip
+    try { const t2 = JSON.parse(JSON.stringify(Opponent.DEFAULT_TABLE)); t2.joints.glR[0] -= 20; probe.setTable(t2); probe.draw(c, { t: 1, dt: 16, state: 'idle', prog: 0 }); } catch (e) { fails++; log('FAIL setTable: ' + (e.message || e)); }
+    // smoothness: consecutive idle frames should not jump
+    try {
+      const p2 = new Opponent(); let prev = null, maxJump = 0;
+      for (let i = 0; i < 120; i++) { const o = p2.draw(c, { t: i * 16, dt: 16, state: i < 60 ? 'idle' : 'stun', prog: (i % 60) / 60, hurtAge: 1e9, walking: 0.5 }); const g = o.joints.glR; if (prev) maxJump = Math.max(maxJump, Math.hypot(g[0] - prev[0], g[1] - prev[1])); prev = g; }
+      log('max glove move per frame (idle->stun): ' + maxJump.toFixed(1) + ' units'); if (maxJump > 30) throw new Error('glove jumped ' + maxJump.toFixed(1) + ' units in one frame');
+    } catch (e) { fails++; log('FAIL smoothness: ' + (e.message || e)); }
+    // punches in line: during 'strike' a straight punch's glove centre stays within 15% of the
+    // shoulder->target segment length from that line (checked at prog 0.5 and 1.0)
+    try {
+      const T = { x: 5, y: -160, r: 140 };
+      for (const atk of ['jab', 'body', 'overhead']) {
+        const pr = new Opponent(), h = Opponent.HAND[atk]; let tt = 0;
+        for (let i = 0; i < 40; i++) { tt += 16; pr.draw(c, { t: tt, dt: 16, state: 'windup', attack: atk, prog: i / 40, hurtAge: 1e9, walking: 0, target: T }); }
+        for (const p of [0.5, 1]) {
+          tt += 16; const o = pr.draw(c, { t: tt, dt: 16, state: 'strike', attack: atk, prog: p, hurtAge: 1e9, walking: 0, target: T });
+          const S = o.joints['sh' + h], G = o.joints['gl' + h];
+          const dx = T.x - S[0], dy = T.y - S[1], L = Math.hypot(dx, dy);
+          const off = Math.abs((G[0] - S[0]) * dy - (G[1] - S[1]) * dx) / L;
+          log(`${atk} prog ${p}: glove ${off.toFixed(1)} units off the shoulder->target line (limit ${(0.15 * L).toFixed(1)})`);
+          if (off > 0.15 * L) throw new Error(`${atk} at prog ${p} is ${off.toFixed(1)} units off the shoulder->target line`);
+        }
+      }
+    } catch (e) { fails++; log('FAIL punch line: ' + (e.message || e)); }
+    const msg = fails ? 'FAIL ' + fails : 'PASS';
+    document.title = msg; $('status').textContent = 'self-check: ' + msg;
+    log('self-check ' + msg);
+  }
+  try { selfCheck(); } catch (e) { document.title = 'FAIL 1'; $('status').textContent = 'self-check threw: ' + e; log('self-check threw ' + (e.stack || e)); }
+  $('img').textContent = 'boxer.png: ' + ASSETS.status('boxer');
+  // once the real image is in: build the part cache and check every part cut out something opaque
+  // (a mask that misses its rect, or a hole that was not re-filled, shows up here)
+  function checkCache(im) {
+    if (!im || $('synth').checked) return;
+    try {
+      const probe = new Opponent(); const off = document.createElement('canvas'); off.width = 64; off.height = 64;
+      probe.draw(off.getContext('2d'), { t: 1, dt: 16, state: 'idle', prog: 0 });
+      const parts = probe.cache && probe.cache.parts; if (!parts) throw new Error('no cache built');
+      let bad = 0, holes = 0;
+      for (const name in parts) {
+        const e = parts[name], c = e.cv.getContext('2d'), d = c.getImageData(0, 0, e.sw, e.sh).data;
+        let op = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 40) op++;
+        const frac = op / (e.sw * e.sh);
+        if (frac < 0.12) { bad++; log(`cache: ${name} is only ${(frac * 100).toFixed(1)}% opaque`); }
+        // a re-filled hole must not leave transparent pixels inside the mask: sample the occluded chest
+        if (name === 'torso') { for (const [x, y] of [[430, 380], [560, 400], [600, 350]]) { const i = ((y - e.sy) * e.sw + (x - e.sx)) * 4; if (d[i + 3] < 40) { holes++; log(`cache: torso hole at ${x},${y}`); } } }
+      }
+      const msg = bad || holes ? 'FAIL cache' : 'PASS';
+      log('image cache: ' + Object.keys(parts).length + ' parts, ' + msg);
+      if (bad || holes) { document.title = 'FAIL cache'; $('status').textContent = 'self-check: FAIL cache'; }
+    } catch (e) { log('image cache check threw: ' + (e.message || e)); document.title = 'FAIL cache'; $('status').textContent = 'self-check: FAIL cache'; }
+  }
+  if (realImg) checkCache(realImg);
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>

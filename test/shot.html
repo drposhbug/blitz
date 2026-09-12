@@ -1,0 +1,31 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>shot</title><style>body{margin:0;background:#000}</style></head><body>
+<iframe id="f" width="960" height="540" style="border:0;display:block"></iframe>
+<script>
+// Steps the game to a chosen moment so a headless --screenshot shows a real frame.
+// ?at=idle|walk|windup|punch|dodge|hit|duck|ko|turn  &arena=waterfront|rooftop|backstreet|shrine|temple
+const q = new URLSearchParams(location.search), want = q.get('at') || 'windup', arena = q.get('arena') || 'waterfront';
+const fr = document.getElementById('f');
+fr.src = '../index.html?autostart=1&mode=kb&arena=' + arena;
+fr.onload = () => {
+  const w = fr.contentWindow;
+  setTimeout(() => {
+    const F = w.__fight, fi = F.fight;
+    F.freeze = true; // only our step() calls advance the game from here on
+    const until = (c, max) => { let n = 0; while (!c() && n++ < (max || 3000)) F.step(16); };
+    const release = () => { for (const k in F.kb) F.kb[k] = false; };
+    const approach = () => { F.kb.fwd = true; until(() => fi.inRange(), 400); release(); };
+    until(() => fi.npc.state === 'idle');
+    if (want === 'idle') { until(() => false, 40); }
+    if (want === 'walk') { F.kb.fwd = true; F.kb.R = true; until(() => false, 25); }
+    if (want === 'turn') { fi.npc.x = fi.player.x - 0.9; fi.npc.z = fi.player.z + 0.2; fi._setNpc('intro', 1e9); until(() => false, 12); }
+    if (want === 'windup') { approach(); until(() => fi.npc.state === 'windup'); until(() => fi.npcProgress > 0.7, 60); }
+    if (want === 'punch') { approach(); until(() => fi.npc.state === 'windup'); F.punch('L', 1); for (let i = 0; i < 6; i++) F.step(16); }
+    if (want === 'dodge') { approach(); until(() => fi.npc.state === 'windup'); F.kb.back = true; until(() => fi.npc.state === 'stun'); release(); F.kb.fwd = true; until(() => fi.inRange(), 300); release(); F.punch('R', 1); for (let i = 0; i < 5; i++) F.step(16); }
+    if (want === 'hit') { approach(); until(() => fi.player.hitsTaken > 0); F.step(16); F.step(16); }
+    if (want === 'duck') { approach(); F.kb.duck = true; until(() => false, 20); }
+    if (want === 'ko') { approach(); fi.npc.hp = 1; F.punch('L', 1); until(() => false, 30); }
+    document.title = 'READY';
+  }, 800);
+};
+</script></body></html>
